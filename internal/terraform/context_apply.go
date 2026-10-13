@@ -197,7 +197,10 @@ func (c *Context) ApplyAndEval(plan *plans.Plan, config *configs.Config, opts *A
 		return nil, nil, diags
 	}
 
-	changes, err := plan.Changes.Decode(schemas)
+	// Most of the changes in a plan for a large configuration are typically
+	// no-ops, whose values are rarely needed during the apply phase, so we
+	// leave those to be decoded only if something asks for them.
+	changes, err := plan.Changes.DecodeDeferringNoOps(schemas)
 	if err != nil {
 		diags = diags.Append(err)
 		return nil, nil, diags
@@ -229,6 +232,13 @@ func (c *Context) ApplyAndEval(plan *plans.Plan, config *configs.Config, opts *A
 	logging.Phase("apply: walk graph")
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)
+	for _, err := range walker.Changes.DecodeErrors() {
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Invalid planned change",
+			fmt.Sprintf("The saved plan could not be decoded: %s.", err),
+		))
+	}
 
 	// After the walk is finished, we capture a simplified snapshot of the
 	// check result data as part of the new state.
