@@ -1,0 +1,51 @@
+{
+  "variable": {
+    "salt": {"default": "two"}
+  },
+  "locals": {
+    "items": {"alpha": "1", "beta": "2", "gamma": "${var.salt}"},
+    "rendered": "${templatefile(\"${path.module}/template.tftpl\", {items = local.items})}",
+    "hashed": "${sha256(local.rendered)}",
+    "listed": "${sort(keys(local.items))}",
+    "encoded": "${base64encode(jsonencode(local.items))}"
+  },
+  "resource": {
+    "fp_thing": {
+      "from_json": {
+        "for_each": "${local.items}",
+        "name": "json-${each.key}",
+        "value": "${each.value}",
+        "tags": "${local.items}",
+        "rule": [
+          {"port": 80, "cidr": "10.0.0.0/8"},
+          {"port": 443, "cidr": "10.0.0.0/8", "proto": "tcp"}
+        ]
+      },
+      "rendered": {
+        "name": "rendered",
+        "value": "${local.rendered}",
+        "items": "${local.listed}",
+        "obj": {"a": "${local.hashed}", "b": "${length(local.encoded)}"}
+      },
+      "second_configuration": {
+        "provider": "fp.second",
+        "count": 2,
+        "name": "second-${count.index}",
+        "value": "${fp_thing.rendered.late}"
+      }
+    }
+  },
+  "module": {
+    "aliased": {
+      "source": "./modules/aliased",
+      "for_each": "${toset([\"m1\", \"m2\"])}",
+      "name": "${each.key}",
+      "providers": {"fp": "fp", "fp.other": "fp.second"}
+    }
+  },
+  "output": {
+    "rendered": {"value": "${local.rendered}"},
+    "hashed": {"value": "${local.hashed}"},
+    "lates": {"value": "${[for m in module.aliased : m.late]}"}
+  }
+}

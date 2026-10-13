@@ -1,0 +1,11 @@
+{
+  "description": "Everything destroyed, in the reverse of the order it was created in: by a destroy plan saved and applied, and, after creating it all again, by a destroy with no saved plan. The state that's left has no resources and no outputs.",
+  "covers": ["destroy-edges", "walker", "state-write", "module-expansion", "apply-without-plan-file", "state-snapshots"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 6 to add, 0 to change, 0 to destroy"], "order": [["foundation", "lower-0"], ["lower-0", "upper-1"], ["upper-0", "roof"]]},
+    {"name": "destroy", "op": "apply", "plan_args": ["-destroy"], "expect": ["Plan: 0 to add, 0 to change, 6 to destroy"], "order": [["roof", "upper-0"], ["upper-1", "lower-0"], ["lower-1", "foundation"]]},
+    {"name": "create-again", "op": "apply-direct", "expect": ["Apply complete! Resources: 6 added, 0 changed, 0 destroyed"]},
+    {"name": "destroy-again", "op": "apply-direct", "plan_args": ["-destroy"], "expect": ["0 added, 0 changed, 6 destroyed"], "order": [["roof", "upper-1"], ["lower-0", "foundation"]]},
+    {"name": "nothing-left", "op": "cmd", "args": ["state", "list"]}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "description": "A state file that wasn't written by this Terraform, read and then acted on. It records an older Terraform version, has its properties out of order, is compact in some places and indented in others, uses escapes that Terraform itself doesn't, has an attribute that the schema no longer has and an older schema version to upgrade from, an instance key that isn't ASCII, sensitive paths, a deposed object, a tainted object, an object in a module instance that the configuration doesn't declare, a data resource that the configuration doesn't declare, and an output that it doesn't declare. None of that is the plain form that the fork's own decoder handles, so this is what makes it hand the work back to the standard one.",
+  "covers": ["state-read", "state-read-fallback", "state-upgrade", "state-write", "deposed", "tainted", "state-module-index", "marks", "plan-render"],
+  "initial_state": "initial.tfstate",
+  "steps": [
+    {"name": "list", "config": "v1", "op": "cmd", "args": ["state", "list"]},
+    {"name": "plan-without-refreshing", "op": "plan", "plan_args": ["-refresh=false"], "expect": ["to destroy"]},
+    {"name": "apply", "op": "apply", "expect": ["is tainted, so must be replaced", "(deposed object"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

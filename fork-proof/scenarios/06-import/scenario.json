@@ -1,0 +1,9 @@
+{
+  "description": "Objects brought into the state with import blocks: one imported as it is, one imported and updated in the same plan, and several imported with for_each.",
+  "covers": ["import", "changes-index", "plan-render", "state-encode", "walker"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 1 to add, 0 to change, 0 to destroy"]},
+    {"name": "import", "config": "v2", "op": "apply", "expect": ["Plan: 4 to import, 0 to add, 1 to change, 0 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

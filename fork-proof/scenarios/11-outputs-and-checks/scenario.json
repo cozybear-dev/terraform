@@ -1,0 +1,10 @@
+{
+  "description": "Many output values, of the root module and of every instance of a module, with preconditions; variable validation; resource preconditions and postconditions; and check blocks, one of which fails and so produces a warning and a failing result recorded in the state, until a variable changes and it passes.",
+  "covers": ["output-index", "named-values", "check-results", "state-write", "state-read", "plan-render", "module-expansion"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 3 to add, 0 to change, 0 to destroy", "The limit is not small."]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["The limit is not small."]},
+    {"name": "check-passes", "config": "v2", "op": "apply", "expect": ["Plan: 0 to add, 3 to change, 0 to destroy"]},
+    {"name": "outputs", "op": "cmd", "args": ["output", "-json"]}
+  ]
+}

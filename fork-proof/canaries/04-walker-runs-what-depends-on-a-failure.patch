@@ -1,0 +1,17 @@
+diff --git a/internal/dag/walk.go b/internal/dag/walk.go
+index 7998522552..6b0d5dc863 100644
+--- a/internal/dag/walk.go
++++ b/internal/dag/walk.go
+@@ -236,11 +236,7 @@ func (w *Walker) walkOne(i int32) (next int32) {
+ 	next = -1
+ 	for _, wi := range w.waiters[w.waiterOffsets[i]:w.waiterOffsets[i+1]] {
+ 		waiter := &w.vertices[wi]
+-		if failed {
+-			// This must happen before we count ourselves as complete,
+-			// because the waiter can start as soon as we do that.
+-			waiter.depFailed.Store(true)
+-		}
++		_ = failed
+ 		if waiter.pending.Add(-1) == 0 {
+ 			if next < 0 {
+ 				next = wi

@@ -1,0 +1,14 @@
+# Commits of upstream's that are later than the one in UPSTREAM_REF and that
+# the fork carries anyway, one to a line, in the order they're applied. The
+# proof applies each of them to upstream before it builds it, so the fork is
+# compared with upstream as it is with those commits and no others.
+#
+# This is for a fix that upstream has made and hasn't released in the version
+# the fork is based on, where upstream without the fix can't be compared with
+# anything, the fork included, because what it does varies from run to run.
+# Each line is a claim that the commit is upstream's own, which anyone can
+# check against github.com/hashicorp/terraform, and each is recorded in the
+# report. Take a line out when UPSTREAM_REF moves to a version that has it.
+#
+# Adding a line is a decision for a person. See proposals/workflows.
+3c8cba7d994e3f9e759d8852ac7414ef611d0953  copy the module path for each partial-expanded module instance

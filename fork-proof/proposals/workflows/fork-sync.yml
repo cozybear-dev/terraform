@@ -1,0 +1,237 @@
+---
+# PROPOSAL. Not enabled: this file isn't in .github/workflows.
+#
+# Moves the fork onto a newer upstream, with an agent doing the mechanical
+# work and deterministic checks deciding whether the result is acceptable.
+#
+# Before enabling:
+#   - Protect the fork's branches (perf/v*): pull requests only, required checks
+#     "Fork integrity proof" and "Upstream tests", and code owner review
+#     required for the paths in CODEOWNERS.fragment.
+#   - Create the "fork-sync" environment with the agent's API key in it and
+#     no other secret. The agent's job has no token that can write to the
+#     repository; a later job with no agent in it pushes the branch.
+#   - Decide the target policy below (releases only, by default).
+#
+# The shape of it:
+#   detect   Is there an upstream release that the fork isn't based on?
+#   rebase   The agent rebases the patch series onto it in a sandbox, and
+#            may only edit the fork's own code. It can't push, and it can't
+#            change the proof, the corpus, the workflows or upstream's tests.
+#   guard    A script, not the agent, rejects the result if any protected
+#            path changed, if any upstream test was changed or removed, or
+#            if anything outside the fork's declared files changed.
+#   gate     The proof and upstream's tests run against the result, using
+#            the proof from the PROTECTED branch, with UPSTREAM_REF set to
+#            the new target. This job doesn't trust anything the agent wrote
+#            except the code under test.
+#   propose  Pushes the result where nothing is published from, and opens
+#            an issue with the reports attached. A person publishes it.
+
+name: Fork sync
+
+on:
+  schedule:
+    - cron: '17 5 * * 1' # Mondays
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Upstream tag or commit to move to (default, the newest release)
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.find.outputs.target }}
+      commit: ${{ steps.find.outputs.commit }}
+      needed: ${{ steps.find.outputs.needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: find
+        run: |
+          target="${{ inputs.target }}"
+          if [ -z "$target" ]; then
+            # The newest release that isn't a pre-release.
+            target="$(git ls-remote --tags --refs https://github.com/hashicorp/terraform.git 'v*' \
+              | awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          fi
+          commit="$(git ls-remote https://github.com/hashicorp/terraform.git "refs/tags/${target}^{}" "refs/tags/${target}" "$target" | tail -1 | cut -f1)"
+          current="$(cat fork-proof/UPSTREAM_REF)"
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "needed=$([ "$commit" != "$current" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  rebase:
+    needs: detect
+    if: needs.detect.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    environment: fork-sync
+    timeout-minutes: 120
+    permissions:
+      contents: read # the agent's job can't push
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+      - name: Rebase onto the target
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TARGET: ${{ needs.detect.outputs.commit }}
+        run: |
+          git fetch --no-tags https://github.com/hashicorp/terraform.git "$TARGET"
+          git switch -c "sync/${TARGET::12}"
+          # The agent harness goes here, with a brief along these lines and
+          # with tools limited to this checkout: no network beyond the Go
+          # module proxy, no credentials, no shell access to anything else.
+          #
+          #   Rebase the fork's patches, which are the commits of this branch
+          #   after the one in fork-proof/UPSTREAM_REF, onto $TARGET, one at
+          #   a time (README-FORK.md, "How the fork is maintained"). Resolve conflicts so that each
+          #   commit still does what its message says. Where upstream has
+          #   changed the code that a commit replaces, re-derive the
+          #   replacement from upstream's new code rather than keeping the
+          #   old replacement. If a commit can't be carried over with
+          #   confidence, drop it, and say so in SYNC-NOTES.md with the
+          #   reason: the fork without one optimisation is acceptable, and a
+          #   wrong one is not. You may not edit fork-proof/, .github/,
+          #   CODEOWNERS, any file of upstream's that ends in _test.go, or
+          #   testdata. Finish by running the fork's own unit tests for the
+          #   packages you touched.
+          echo "agent step not configured" >&2
+          exit 1
+      - name: Export the result as a bundle
+        run: git bundle create "$RUNNER_TEMP/sync.bundle" "${{ needs.detect.outputs.commit }}..HEAD"
+      - uses: actions/upload-artifact@v4 # pin
+        with:
+          name: sync-bundle
+          path: |
+            ${{ runner.temp }}/sync.bundle
+            SYNC-NOTES.md
+
+  guard:
+    name: Check what the agent changed
+    needs: [detect, rebase]
+    runs-on: ubuntu-latest
+    steps:
+      # The protected branch, not the agent's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4 # pin
+        with:
+          name: sync-bundle
+          path: bundle
+      - name: Reject changes to anything that decides what the checks mean
+        env:
+          TARGET: ${{ needs.detect.outputs.commit }}
+        run: |
+          git fetch --no-tags https://github.com/hashicorp/terraform.git "$TARGET"
+          git fetch bundle/sync.bundle 'refs/heads/*:refs/remotes/sync/*'
+          result="$(git for-each-ref --format='%(refname)' refs/remotes/sync | head -1)"
+          fail=0
+          # 1. Nothing protected may differ from the protected branch.
+          if ! git diff --quiet HEAD "$result" -- fork-proof .github CODEOWNERS; then
+            echo "::error::the proof, the workflows or CODEOWNERS were changed"; fail=1
+          fi
+          # 2. Upstream's tests and test data must be exactly upstream's,
+          #    apart from the test files the fork itself added.
+          changed="$(git diff --name-only --diff-filter=MD "$TARGET" "$result" -- '*_test.go' '**/testdata/**')"
+          if [ -n "$changed" ]; then
+            echo "::error::upstream tests or test data were changed or removed:"; echo "$changed"; fail=1
+          fi
+          # 3. No file outside the fork's declared set may differ from
+          #    upstream. The set is a file in the protected branch.
+          undeclared="$(git diff --name-only "$TARGET" "$result" | grep -vxFf fork-proof/FORK_FILES || true)"
+          if [ -n "$undeclared" ]; then
+            echo "::error::files that the fork doesn't declare were changed:"; echo "$undeclared"; fail=1
+          fi
+          exit "$fail"
+
+  gate:
+    name: Prove the result
+    needs: [detect, guard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # The proof comes from the protected branch...
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: trusted
+      - uses: actions/download-artifact@v4 # pin
+        with:
+          name: sync-bundle
+          path: bundle
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: trusted/.go-version
+      - name: Run the proof and upstream's tests against the result
+        env:
+          TARGET: ${{ needs.detect.outputs.commit }}
+        run: |
+          cd trusted
+          git fetch --no-tags https://github.com/hashicorp/terraform.git "$TARGET"
+          git fetch ../bundle/sync.bundle 'refs/heads/*:refs/remotes/sync/*'
+          result="$(git for-each-ref --format='%(refname)' refs/remotes/sync | head -1)"
+          # ...and is pointed at the code under test and at the new target.
+          (cd fork-proof && go test . && go run . -upstream-ref "$TARGET" -fork-ref "$result" -tier nightly -report "$RUNNER_TEMP/report.json")
+          # Upstream's whole test suite, and the race detector on the
+          # packages where the fork does work concurrently.
+          git worktree add "$RUNNER_TEMP/result" "$result"
+          cd "$RUNNER_TEMP/result"
+          go test ./...
+          go test -race ./internal/dag/... ./internal/states/... ./internal/plans/... ./internal/terraform/... \
+            ./internal/backend/local/... ./internal/instances/... ./internal/namedvals/... ./internal/refactoring/...
+          (cd internal/backend/remote-state/gcs && go test -race .)
+      - uses: actions/upload-artifact@v4 # pin
+        if: always()
+        with:
+          name: sync-proof-report
+          path: ${{ runner.temp }}/report.json
+
+  propose:
+    name: Open a pull request
+    needs: [detect, gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4 # pin
+        with:
+          path: artifacts
+      - name: Push the branch and ask for it to be reviewed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ needs.detect.outputs.target }}
+          COMMIT: ${{ needs.detect.outputs.commit }}
+        run: |
+          git fetch artifacts/sync-bundle/sync.bundle 'refs/heads/*:refs/heads/*'
+          git push origin "sync/${COMMIT::12}"
+          # The patches rebased onto a newer upstream aren't a descendant of
+          # the branch they came from, so this can't be a pull request into
+          # it. The result is pushed under sync/, which nothing is published
+          # from, and an issue asks a person to read the reports and, if
+          # they accept it, to push it as the branch for that version of
+          # upstream, perf/<version>, which is what publishes an image.
+          # Protect perf/* so that only a person can create or move one.
+          # UPSTREAM_REF moves in that branch, by this job and not by the
+          # agent.
+          gh issue create \
+            --title "Fork rebased onto upstream ${TARGET}: review sync/${COMMIT::12}" \
+            --body "Rebased onto ${COMMIT} by the sync workflow. The proof report and the agent's notes are attached to the workflow run. If they're acceptable, push sync/${COMMIT::12} as perf/${TARGET}."

@@ -1,0 +1,13 @@
+{
+  "description": "Objects left in the states that only failures produce. Creating one resource reports an error after the object was saved, which leaves it tainted; replacing another creates the new object and then fails to destroy the old one, which leaves that deposed. The plans that follow must propose to replace the first and to destroy the second, and marking and unmarking an object as tainted by hand must do the same.",
+  "covers": ["deposed", "tainted", "state-encode", "state-read", "state-write", "walker", "failure", "plan-render"],
+  "steps": [
+    {"name": "create-fails", "config": "v1", "op": "apply", "apply_rc": 1, "expect": ["Plan: 3 to add, 0 to change, 0 to destroy", "fp_thing was asked to fail after being saved"]},
+    {"name": "replace-fails", "config": "v2", "op": "apply", "apply_rc": 1, "expect": ["is tainted, so must be replaced", "fp_thing was asked to fail when destroyed"]},
+    {"name": "deposed-remains", "config": "v3", "op": "plan", "expect": ["(deposed object", "Plan: 0 to add, 0 to change, 1 to destroy"]},
+    {"name": "taint", "op": "cmd", "args": ["taint", "-no-color", "fp_thing.fine"]},
+    {"name": "tainted-plan", "op": "plan", "expect": ["is tainted, so must be replaced"]},
+    {"name": "untaint", "op": "cmd", "args": ["untaint", "-no-color", "fp_thing.fine"]},
+    {"name": "untainted-plan", "op": "plan", "expect": ["Plan: 0 to add, 0 to change, 1 to destroy"]}
+  ]
+}

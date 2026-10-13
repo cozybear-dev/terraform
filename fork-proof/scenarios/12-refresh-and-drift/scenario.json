@@ -1,0 +1,11 @@
+{
+  "description": "An object that has changed outside Terraform when it's next refreshed, among others that haven't. A plan without refreshing sees nothing; a refresh-only plan reports the change and applying it updates the state and nothing else; a normal plan then proposes to put the object back, which is applied. The state before refreshing and the state after it differ here, so the two snapshots in the plan file do too.",
+  "covers": ["refresh-unchanged", "refresh-only", "plan-file", "plan-render", "state-write", "resource-value-cache"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 6 to add, 0 to change, 0 to destroy"]},
+    {"name": "without-refreshing", "op": "plan", "plan_args": ["-refresh=false"], "expect": ["No changes."]},
+    {"name": "refresh-only", "op": "apply", "plan_args": ["-refresh-only"], "expect": ["Objects have changed outside of Terraform", "configured-drifted"]},
+    {"name": "put-back", "op": "apply", "expect": ["Plan: 0 to add, 1 to change, 0 to destroy"]},
+    {"name": "drifts-again", "op": "plan", "expect": ["Plan: 0 to add, 1 to change, 0 to destroy"]}
+  ]
+}

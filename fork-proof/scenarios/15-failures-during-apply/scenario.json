@@ -1,0 +1,11 @@
+{
+  "description": "An apply in which one resource fails. Everything that doesn't depend on it must still be applied and saved, nothing that depends on it may be attempted, and the command must fail. Then the same resource fails while planning, which must produce no plan and change nothing. Then the fault is removed and the apply completes what was left.",
+  "covers": ["failure", "walker", "state-write", "state-snapshots", "changes-index", "plan-render"],
+  "steps": [
+    {"name": "apply-fails", "config": "v1", "op": "apply", "apply_rc": 1, "expect": ["Plan: 11 to add, 0 to change, 0 to destroy", "fp_thing was asked to fail when applied"]},
+    {"name": "what-was-saved", "op": "cmd", "args": ["state", "list"]},
+    {"name": "plan-fails", "config": "v2", "op": "plan", "plan_rc": 1, "expect": ["fp_thing was asked to fail when planned"]},
+    {"name": "completes", "config": "v3", "op": "apply", "expect": ["Plan: 5 to add, 0 to change, 0 to destroy"], "order": [["breaks", "after-0"], ["after-2", "much-later"]]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

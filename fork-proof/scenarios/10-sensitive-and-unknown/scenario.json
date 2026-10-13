@@ -1,0 +1,10 @@
+{
+  "description": "Values that are sensitive because the schema says so, because a variable is, and because a function made them so, including single sensitive elements inside maps, lists and objects; values that aren't known until something has been applied; and sensitive outputs. Then the sensitive value and an ordinary value both change.",
+  "covers": ["marks", "state-encode", "state-read", "plan-render", "plan-file", "resource-value-cache", "refresh-unchanged"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 3 to add, 0 to change, 0 to destroy", "(sensitive value)", "(known after apply)"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to change", "(sensitive value)"]},
+    {"name": "nothing-to-do-again", "op": "plan", "plan_args": ["-refresh=false"], "expect": ["No changes."]}
+  ]
+}

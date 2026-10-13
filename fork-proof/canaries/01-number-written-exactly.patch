@@ -1,0 +1,34 @@
+diff --git a/internal/states/marshal_json.go b/internal/states/marshal_json.go
+index e07eb34df2..c0bf667b95 100644
+--- a/internal/states/marshal_json.go
++++ b/internal/states/marshal_json.go
+@@ -6,7 +6,6 @@ package states
+ import (
+ 	"encoding/json"
+ 	"math/big"
+-	"math/bits"
+ 	"sort"
+ 	"strconv"
+ 	"sync"
+@@ -237,20 +236,7 @@ func (enc *jsonEncoder) appendJSONNumber(buf []byte, f *big.Float) ([]byte, bool
+ 	// the general path.
+ 	if f.IsInt() && f.Sign() != 0 {
+ 		if i, accuracy := f.Int64(); accuracy == big.Exact {
+-			// The general path writes the shortest decimal number that
+-			// identifies the value among those that can be held with the
+-			// same precision, which is only certain to be the integer
+-			// itself when that precision distinguishes it from the integers
+-			// either side of it. A large integer held as a 64-bit float,
+-			// such as the result of pow(2, 60), is written with its last
+-			// digits as zeros instead, and we must write the same thing.
+-			magnitude := uint64(i)
+-			if i < 0 {
+-				magnitude = -magnitude
+-			}
+-			if uint(bits.Len64(magnitude)) <= f.Prec() {
+-				return strconv.AppendInt(buf, i, 10), true
+-			}
++			return strconv.AppendInt(buf, i, 10), true
+ 		}
+ 	}
+ 	enc.exact = false

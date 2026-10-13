@@ -1,0 +1,9 @@
+{
+  "description": "Data sources that can be read while planning, that must wait for a resource because they refer to something not yet known, and that must wait only because of depends_on; and resources ordered by depends_on alone.",
+  "covers": ["data-depends-on", "walker", "resource-value-cache", "attach-dependencies", "plan-render"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 5 to add, 0 to change, 0 to destroy"], "order": [["source", "consumer-0"], ["consumer-0", "waits"], ["consumer-2", "waits"]]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to change"], "order": [["source", "consumer-1"]]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

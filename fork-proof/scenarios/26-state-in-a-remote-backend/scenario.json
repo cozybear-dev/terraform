@@ -1,0 +1,20 @@
+{
+  "description": "The count and for_each scenario with its state in a remote backend instead of a local file: an HTTP server that the proof runs. Plan and apply then go through the state manager for remote state, as they do for a state in a bucket, where each snapshot is written in memory and persisted separately and where the fork decides whether anything has changed from a digest. After the changes, an apply in which one resource fails, which must still persist everything that succeeded; then a destroy, which must leave the server holding an empty state.",
+  "covers": [
+    "state-manager-remote",
+    "state-snapshots",
+    "state-write",
+    "state-read",
+    "failure",
+    "plan-file"
+  ],
+  "backend": "http",
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 14 to add, 0 to change, 0 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to add", "to destroy"]},
+    {"name": "one-fails", "config": "v3", "op": "apply", "apply_rc": 1, "expect": ["Plan: 5 to add, 0 to change, 0 to destroy", "fp_thing was asked to fail when applied"]},
+    {"name": "what-was-persisted", "op": "cmd", "args": ["state", "list"]},
+    {"name": "destroy", "op": "apply-direct", "plan_args": ["-destroy"], "expect": ["destroyed"]}
+  ]
+}

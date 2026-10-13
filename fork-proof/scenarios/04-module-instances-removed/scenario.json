@@ -1,0 +1,10 @@
+{
+  "description": "Module instances that stop existing while their objects are still in the state: fewer instances of a counted module, keys removed from a for_each module (each with nested modules of their own), and then two module calls removed from the configuration altogether. Every resource in the configuration has to find its objects in module instances that are no longer declared, which is the search that the fork replaced with an index of the modules in the state.",
+  "covers": ["state-module-index", "expander", "module-expansion", "walker", "changes-index", "state-write"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 52 to add, 0 to change, 0 to destroy"]},
+    {"name": "fewer-instances", "config": "v2", "op": "apply", "expect": ["Plan: 7 to add, 0 to change, 32 to destroy"]},
+    {"name": "modules-removed", "config": "v3", "op": "apply", "expect": ["Plan: 0 to add, 0 to change, 20 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}
