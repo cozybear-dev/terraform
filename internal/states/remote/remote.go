@@ -36,6 +36,28 @@ type ClientLocker interface {
 type Payload struct {
 	MD5  []byte
 	Data []byte
+
+	// Revision optionally identifies this particular snapshot, for a
+	// client that implements ClientRevisioner. It's empty otherwise.
+	Revision string
+}
+
+// ClientRevisioner is an optional interface for a client that can find out
+// which snapshot is currently stored without retrieving it.
+//
+// A state manager is typically asked to refresh more than once in the
+// course of an operation, and for a large state retrieving and parsing the
+// snapshot each time is expensive. A client that implements this allows
+// the manager to skip that when what's stored is still the snapshot that it
+// most recently read.
+type ClientRevisioner interface {
+	Client
+
+	// CurrentRevision returns what the Revision of the payload would be if
+	// Get were called now: a string that is different for every snapshot
+	// that has ever been stored. It returns an empty string if that can't
+	// be determined or if there is no snapshot.
+	CurrentRevision() (string, error)
 }
 
 // Factory is the factory function to create a remote client.

@@ -39,7 +39,21 @@ type State struct {
 	lineage, readLineage string
 	serial, readSerial   uint64
 	state, readState     *states.State
-	disableLocks         bool
+
+	// lastSize is the size in bytes of the most recent snapshot that we
+	// read or persisted, if any.
+	lastSize int
+
+	// readDigest is the digest of readState, if we've had reason to
+	// calculate it. It must be reset whenever readState changes.
+	readDigest   *statefile.MarshalDigest
+	disableLocks bool
+
+	// readRevision identifies the snapshot that we most recently read, if
+	// the client can tell us that and if nothing has been written to this
+	// manager since, in which case refreshing can't change anything as long
+	// as that's still the snapshot that's stored. It's empty otherwise.
+	readRevision string
 
 	// If this is set then the state manager will decline to store intermediate
 	// state snapshots created while a Terraform Core apply operation is in
@@ -90,6 +104,7 @@ func (s *State) WriteState(state *states.State) error {
 	// a reference to the given object and can potentially go on to mutate
 	// it after we return, but we want the snapshot at this point in time.
 	s.state = state.DeepCopy()
+	s.readRevision = ""
 
 	return nil
 }
@@ -118,6 +133,7 @@ func (s *State) WriteStateForMigration(f *statefile.File, force bool) error {
 	// a reference to the given object and can potentially go on to mutate
 	// it after we return, but we want the snapshot at this point in time.
 	s.state = f.State.DeepCopy()
+	s.readRevision = ""
 	s.lineage = f.Lineage
 	s.serial = f.Serial
 
@@ -135,6 +151,16 @@ func (s *State) RefreshState() error {
 // that we can make internal calls to it from methods that are already holding
 // the s.mu lock.
 func (s *State) refreshState() error {
+	if rc, ok := s.Client.(ClientRevisioner); ok && s.readRevision != "" {
+		// If what's stored is still the snapshot we read last time, and
+		// nothing has been written here since, then reading it again would
+		// leave everything exactly as it is now.
+		if current, err := rc.CurrentRevision(); err == nil && current == s.readRevision {
+			return nil
+		}
+	}
+	s.readRevision = ""
+
 	payload, diags := s.Client.Get()
 	if diags.HasErrors() {
 		return diags.Err()
@@ -143,15 +169,17 @@ func (s *State) refreshState() error {
 	// no remote state is OK
 	if payload == nil {
 		s.readState = nil
+		s.readDigest = nil
 		s.lineage = ""
 		s.serial = 0
 		return nil
 	}
 
-	stateFile, err := statefile.Read(bytes.NewReader(payload.Data))
+	stateFile, err := statefile.ReadBytes(payload.Data)
 	if err != nil {
 		return err
 	}
+	s.lastSize = len(payload.Data)
 
 	s.lineage = stateFile.Lineage
 	s.serial = stateFile.Serial
@@ -162,6 +190,8 @@ func (s *State) refreshState() error {
 	s.readLineage = stateFile.Lineage
 	s.readSerial = stateFile.Serial
 	s.readState = s.state.DeepCopy()
+	s.readDigest = nil
+	s.readRevision = payload.Revision
 	return nil
 }
 
@@ -173,10 +203,33 @@ func (s *State) PersistState(schemas *schemarepo.Schemas) error {
 	log.Printf("[DEBUG] states/remote: state read serial is: %d; serial is: %d", s.readSerial, s.serial)
 	log.Printf("[DEBUG] states/remote: state read lineage is: %s; lineage is: %s", s.readLineage, s.lineage)
 
+	// stateDigest is the digest of s.state, if we calculate it below.
+	var stateDigest *statefile.MarshalDigest
+
 	if s.readState != nil {
 		lineageUnchanged := s.readLineage != "" && s.lineage == s.readLineage
 		serialUnchanged := s.readSerial != 0 && s.serial == s.readSerial
-		stateUnchanged := statefile.StatesMarshalEqual(s.state, s.readState)
+		stateUnchanged := false
+		// We can usually tell that the state has changed without needing to
+		// serialize it for comparison.
+		if s.state != nil && !statefile.StatesDefinitelyDiffer(s.state, s.readState) {
+			// We need the digest of the snapshot we read only the first
+			// time we get here, and then we calculate it at the same time
+			// as the digest of the new snapshot.
+			var wg sync.WaitGroup
+			if s.readDigest == nil {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					digest := statefile.StateMarshalDigest(s.readState)
+					s.readDigest = &digest
+				}()
+			}
+			digest := statefile.StateMarshalDigest(s.state)
+			wg.Wait()
+			stateDigest = &digest
+			stateUnchanged = *stateDigest == *s.readDigest
+		}
 		if stateUnchanged && lineageUnchanged && serialUnchanged {
 			// If the state, lineage or serial haven't changed at all then we have nothing to do.
 			return nil
@@ -204,12 +257,20 @@ func (s *State) PersistState(schemas *schemarepo.Schemas) error {
 
 	f := statefile.New(s.state, s.lineage, s.serial)
 
+	// The new snapshot is likely to be a similar size to the previous one,
+	// so we allocate about that much space up front rather than repeatedly
+	// growing and copying a smaller buffer, which is significant for a
+	// large state.
 	var buf bytes.Buffer
+	buf.Grow(s.lastSize + s.lastSize/16 + 512)
 	err := statefile.Write(f, &buf)
 	if err != nil {
 		return err
 	}
+	s.lastSize = buf.Len()
 
+	// Whatever happens now, what's stored may no longer be what we read.
+	s.readRevision = ""
 	diags := s.Client.Put(buf.Bytes())
 	if diags.HasErrors() {
 		return diags.Err()
@@ -222,6 +283,7 @@ func (s *State) PersistState(schemas *schemarepo.Schemas) error {
 	// three fields so everything matches the new state and a subsequent
 	// operation would correctly detect no changes to the lineage, serial or state.
 	s.readState = s.state.DeepCopy()
+	s.readDigest = stateDigest
 	s.readLineage = s.lineage
 	s.readSerial = s.serial
 	return nil
