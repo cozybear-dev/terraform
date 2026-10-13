@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform/internal/command/jsonplan"
 	"github.com/hashicorp/terraform/internal/command/jsonprovider"
 	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/plans"
 )
 
@@ -58,7 +59,19 @@ func precomputeDiffs(plan Plan, mode plans.Mode) diffs {
 		})
 	}
 
-	for _, change := range plan.ResourceChanges {
+	// Computing the diff for each change is independent of all of the others,
+	// and is a significant amount of work for a plan with many resource
+	// instances, so we spread the work across all of the available CPUs.
+	diffs.changes = make([]diff, len(plan.ResourceChanges))
+	parallel.For(len(plan.ResourceChanges), 16, func(i int) {
+		change := plan.ResourceChanges[i]
+		if skeleton := (diff{change: change}); !skeleton.Moved() && !skeleton.Importing() && jsonplan.UnmarshalActions(change.Change.Actions) == plans.NoOp {
+			// Nothing is ever rendered for a change like this, so there's
+			// no need to compute its diff. The zero value of computed.Diff
+			// represents no change.
+			diffs.changes[i] = skeleton
+			return
+		}
 		schema := plan.getSchema(change)
 		structuredChange := structured.FromJsonChange(change.Change, attribute_path.AlwaysMatcher())
 
@@ -101,12 +114,15 @@ func precomputeDiffs(plan Plan, mode plans.Mode) diffs {
 			})
 		}
 
-		diffs.changes = append(diffs.changes, diff{
+		diffs.changes[i] = diff{
 			change:                 change,
 			diff:                   differ.ComputeDiffForBlock(structuredChange, schema.Block),
 			beforeActionsTriggered: beforeActionsTriggered,
 			afterActionsTriggered:  afterActionsTriggered,
-		})
+		}
+	})
+	if len(diffs.changes) == 0 {
+		diffs.changes = nil
 	}
 
 	for _, action := range plan.ActionInvocations {

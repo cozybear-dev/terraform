@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/terraform/internal/command/jsonplan"
 	"github.com/hashicorp/terraform/internal/command/jsonprovider"
 	"github.com/hashicorp/terraform/internal/command/jsonstate"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/plans"
 )
 
@@ -238,11 +239,26 @@ func (plan Plan) renderHuman(renderer Renderer, mode plans.Mode, opts ...plans.Q
 			renderer.Streams.Printf("\nTerraform will perform the following actions:\n")
 		}
 
-		for _, change := range changes {
-			diff, render := renderHumanDiff(renderer, change, proposedChange)
-			if render {
-				fmt.Fprintln(renderer.Streams.Stdout.File)
-				renderer.Streams.Println(diff)
+		// Rendering each change is independent of the others, and a plan
+		// can contain a very large number of them, so we render a batch
+		// of them at a time using all of the available CPUs and then write
+		// each batch in a single operation, in the original order.
+		const batchSize = 256
+		rendered := make([]string, batchSize)
+		for start := 0; start < len(changes); start += batchSize {
+			batch := changes[start:min(start+batchSize, len(changes))]
+			parallel.For(len(batch), 4, func(i int) {
+				rendered[i] = ""
+				if diff, render := renderHumanDiff(renderer, batch[i], proposedChange); render {
+					rendered[i] = "\n" + diff + "\n"
+				}
+			})
+			var out strings.Builder
+			for _, text := range rendered[:len(batch)] {
+				out.WriteString(text)
+			}
+			if out.Len() != 0 {
+				renderer.Streams.Print(out.String())
 			}
 		}
 

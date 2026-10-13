@@ -145,13 +145,17 @@ func marshalPlannedValues(changes *plans.ChangesSrc, schemas *terraform.Schemas)
 	}
 
 	// start with the root module
-	resources, err := marshalPlanResources(changes, moduleResourceMap[""], schemas)
+	// We look up the change for every resource instance below, so we'll
+	// use an index rather than searching all of the changes each time.
+	changeFor := changes.ResourceInstanceLookup()
+
+	resources, err := marshalPlanResourcesWith(changeFor, moduleResourceMap[""], schemas)
 	if err != nil {
 		return ret, err
 	}
 	ret.Resources = resources
 
-	childModules, err := marshalPlanModules(changes, schemas, moduleMap[""], moduleMap, moduleResourceMap)
+	childModules, err := marshalPlanModules(changeFor, schemas, moduleMap[""], moduleMap, moduleResourceMap)
 	if err != nil {
 		return ret, err
 	}
@@ -164,12 +168,24 @@ func marshalPlannedValues(changes *plans.ChangesSrc, schemas *terraform.Schemas)
 	return ret, nil
 }
 
+// resourceChangeLookup is a function that returns the planned change for the
+// current object of the given resource instance, like
+// plans.ChangesSrc.ResourceInstance.
+type resourceChangeLookup func(addrs.AbsResourceInstance) *plans.ResourceInstanceChangeSrc
+
 // marshalPlanResources
 func marshalPlanResources(changes *plans.ChangesSrc, ris []addrs.AbsResourceInstance, schemas *terraform.Schemas) ([]resource, error) {
+	return marshalPlanResourcesWith(changes.ResourceInstance, ris, schemas)
+}
+
+// marshalPlanResourcesWith is marshalPlanResources for a caller that has
+// its own way of finding the change for a resource instance, such as an
+// index of the changes.
+func marshalPlanResourcesWith(changeFor resourceChangeLookup, ris []addrs.AbsResourceInstance, schemas *terraform.Schemas) ([]resource, error) {
 	var ret []resource
 
 	for _, ri := range ris {
-		r := changes.ResourceInstance(ri)
+		r := changeFor(ri)
 		if r.Action == plans.Delete || r.Action == plans.Forget {
 			continue
 		}
@@ -252,7 +268,7 @@ func marshalPlanResources(changes *plans.ChangesSrc, ris []addrs.AbsResourceInst
 // marshalPlanModules iterates over a list of modules to recursively describe
 // the full module tree.
 func marshalPlanModules(
-	changes *plans.ChangesSrc,
+	changeFor resourceChangeLookup,
 	schemas *terraform.Schemas,
 	childModules []addrs.ModuleInstance,
 	moduleMap map[string][]addrs.ModuleInstance,
@@ -269,14 +285,14 @@ func marshalPlanModules(
 		if child.String() != "" {
 			cm.Address = child.String()
 		}
-		rs, err := marshalPlanResources(changes, moduleResources, schemas)
+		rs, err := marshalPlanResourcesWith(changeFor, moduleResources, schemas)
 		if err != nil {
 			return nil, err
 		}
 		cm.Resources = rs
 
 		if len(moduleMap[child.String()]) > 0 {
-			moreChildModules, err := marshalPlanModules(changes, schemas, moduleMap[child.String()], moduleMap, moduleResourceMap)
+			moreChildModules, err := marshalPlanModules(changeFor, schemas, moduleMap[child.String()], moduleMap, moduleResourceMap)
 			if err != nil {
 				return nil, err
 			}

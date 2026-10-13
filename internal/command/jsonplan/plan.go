@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/terraform/internal/command/jsonstate"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/lang/marks"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
@@ -208,7 +209,18 @@ func MarshalForRenderer(p *plans.Plan, schemas *terraform.Schemas) (*Plan, error
 		return nil, err
 	}
 
-	if output.ResourceChanges, err = MarshalResourceChanges(p.Changes.Resources, schemas); err != nil {
+	// The renderer shows nothing at all for a resource instance whose planned
+	// action is a no-op, unless it's also being moved or imported. In a plan
+	// for a large configuration those are typically almost all of the
+	// changes, and marshaling them is expensive, so we leave them out.
+	var visibleChanges []*plans.ResourceInstanceChangeSrc
+	for _, rc := range p.Changes.Resources {
+		if rc.Action == plans.NoOp && rc.Importing == nil && rc.Addr.Equal(rc.PrevRunAddr) {
+			continue
+		}
+		visibleChanges = append(visibleChanges, rc)
+	}
+	if output.ResourceChanges, err = MarshalResourceChanges(visibleChanges, schemas); err != nil {
 		return nil, err
 	}
 
@@ -430,6 +442,7 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 		return sortedResources[i].DeposedKey < sortedResources[j].DeposedKey
 	})
 
+	visible := sortedResources[:0]
 	for _, rc := range sortedResources {
 		dataSource := rc.Addr.Resource.Resource.Mode == addrs.DataResourceMode
 		// We create "delete" actions for data resources so we can clean up
@@ -438,12 +451,24 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 		if dataSource && rc.Action == plans.Delete {
 			continue
 		}
+		visible = append(visible, rc)
+	}
+	if len(visible) == 0 {
+		return ret, nil
+	}
 
-		r, err := marshalResourceChange(rc, schemas)
+	// Each change is marshaled independently of the others, and with a
+	// large plan this is a significant amount of work, so we spread it
+	// across all of the available CPUs.
+	ret = make([]ResourceChange, len(visible))
+	errs := make([]error, len(visible))
+	parallel.For(len(visible), 8, func(i int) {
+		ret[i], errs[i] = marshalResourceChange(visible[i], schemas)
+	})
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		ret = append(ret, r)
 	}
 
 	return ret, nil
