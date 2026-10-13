@@ -3,10 +3,6 @@
 
 package addrs
 
-import (
-	"fmt"
-)
-
 // LocalValue is the address of a local value.
 type LocalValue struct {
 	referenceable
@@ -53,7 +49,7 @@ func (v AbsLocalValue) String() string {
 	if len(v.Module) == 0 {
 		return v.LocalValue.String()
 	}
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.LocalValue.String())
+	return v.Module.String() + "." + v.LocalValue.String()
 }
 
 func (v AbsLocalValue) UniqueKey() UniqueKey {

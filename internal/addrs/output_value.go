@@ -4,8 +4,6 @@
 package addrs
 
 import (
-	"fmt"
-
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 
@@ -94,7 +92,7 @@ func (v AbsOutputValue) String() string {
 	if v.Module.IsRoot() {
 		return v.OutputValue.String()
 	}
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.OutputValue.String())
+	return v.Module.String() + "." + v.OutputValue.String()
 }
 
 func (v AbsOutputValue) Equal(o AbsOutputValue) bool {
@@ -223,14 +221,14 @@ func (v ConfigOutputValue) String() string {
 	if v.Module.IsRoot() {
 		return v.OutputValue.String()
 	}
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.OutputValue.String())
+	return v.Module.String() + "." + v.OutputValue.String()
 }
 
 func (v ConfigOutputValue) ForDisplay() string {
 	if v.Module.IsRoot() {
 		return v.OutputValue.Name
 	}
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.OutputValue.Name)
+	return v.Module.String() + "." + v.OutputValue.Name
 }
 
 func (v ConfigOutputValue) configCheckableSigil() {

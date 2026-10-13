@@ -24,17 +24,17 @@ type Resource struct {
 func (r Resource) String() string {
 	switch r.Mode {
 	case ManagedResourceMode:
-		return fmt.Sprintf("%s.%s", r.Type, r.Name)
+		return r.Type + "." + r.Name
 	case DataResourceMode:
-		return fmt.Sprintf("data.%s.%s", r.Type, r.Name)
+		return "data." + r.Type + "." + r.Name
 	case EphemeralResourceMode:
-		return fmt.Sprintf("ephemeral.%s.%s", r.Type, r.Name)
+		return "ephemeral." + r.Type + "." + r.Name
 	case ListResourceMode:
-		return fmt.Sprintf("list.%s.%s", r.Type, r.Name)
+		return "list." + r.Type + "." + r.Name
 	default:
 		// Should never happen, but we'll return a string here rather than
 		// crashing just in case it does.
-		return fmt.Sprintf("<invalid>.%s.%s", r.Type, r.Name)
+		return "<invalid>." + r.Type + "." + r.Name
 	}
 }
 
@@ -221,7 +221,7 @@ func (r AbsResource) String() string {
 	if len(r.Module) == 0 {
 		return r.Resource.String()
 	}
-	return fmt.Sprintf("%s.%s", r.Module.String(), r.Resource.String())
+	return r.Module.String() + "." + r.Resource.String()
 }
 
 // AffectedAbsResource returns the AbsResource.
@@ -356,7 +356,7 @@ func (r AbsResourceInstance) String() string {
 	if len(r.Module) == 0 {
 		return r.Resource.String()
 	}
-	return fmt.Sprintf("%s.%s", r.Module.String(), r.Resource.String())
+	return r.Module.String() + "." + r.Resource.String()
 }
 
 // AffectedAbsResource returns the AbsResource for the instance.
@@ -469,11 +469,80 @@ func (r ConfigResource) String() string {
 	if len(r.Module) == 0 {
 		return r.Resource.String()
 	}
-	return fmt.Sprintf("%s.%s", r.Module.String(), r.Resource.String())
+	return r.Module.String() + "." + r.Resource.String()
 }
 
 func (r ConfigResource) Equal(o ConfigResource) bool {
 	return r.Module.Equal(o.Module) && r.Resource.Equal(o.Resource)
+}
+
+// StringLess returns true if the string representation of the receiver
+// sorts before the string representation of the given address. It's
+// equivalent to comparing the results of calling String on both, but
+// without the cost of building those strings.
+func (r ConfigResource) StringLess(o ConfigResource) bool {
+	var rBuf, oBuf [16]string
+	rParts := r.appendStringParts(rBuf[:0])
+	oParts := o.appendStringParts(oBuf[:0])
+
+	// The two addresses can be divided into parts differently, so we
+	// compare the overlapping portion of the current part of each one
+	// at each step.
+	for len(rParts) > 0 && len(oParts) > 0 {
+		rPart, oPart := rParts[0], oParts[0]
+		n := min(len(rPart), len(oPart))
+		if c := strings.Compare(rPart[:n], oPart[:n]); c != 0 {
+			return c < 0
+		}
+		if rParts[0] = rPart[n:]; rParts[0] == "" {
+			rParts = rParts[1:]
+		}
+		if oParts[0] = oPart[n:]; oParts[0] == "" {
+			oParts = oParts[1:]
+		}
+	}
+	return len(rParts) == 0 && len(oParts) > 0
+}
+
+// AppendString appends the result of r.String() to dst and returns the
+// extended buffer, without building the string separately.
+func (r ConfigResource) AppendString(dst []byte) []byte {
+	var partsBuf [16]string
+	for _, part := range r.appendStringParts(partsBuf[:0]) {
+		dst = append(dst, part...)
+	}
+	return dst
+}
+
+// appendStringParts appends to parts a series of non-empty strings whose
+// concatenation is the result of r.String().
+func (r ConfigResource) appendStringParts(parts []string) []string {
+	for _, step := range r.Module {
+		parts = append(parts, "module.")
+		if step != "" {
+			parts = append(parts, step)
+		}
+		parts = append(parts, ".")
+	}
+	switch r.Resource.Mode {
+	case ManagedResourceMode:
+	case DataResourceMode:
+		parts = append(parts, "data.")
+	case EphemeralResourceMode:
+		parts = append(parts, "ephemeral.")
+	case ListResourceMode:
+		parts = append(parts, "list.")
+	default:
+		parts = append(parts, "<invalid>.")
+	}
+	if r.Resource.Type != "" {
+		parts = append(parts, r.Resource.Type)
+	}
+	parts = append(parts, ".")
+	if r.Resource.Name != "" {
+		parts = append(parts, r.Resource.Name)
+	}
+	return parts
 }
 
 func (r ConfigResource) UniqueKey() UniqueKey {
