@@ -1,0 +1,265 @@
+---
+name: Fork rebase
+run-name: "Move the fork to upstream ${{ inputs.target }}${{ inputs.dry_run && ' (trial run)' || '' }}"
+
+# Moves the fork to another version of upstream: start it from the Actions
+# tab, give it a tag of upstream's, and it makes the fork's branch for that
+# version. README.md on this branch says what it does and what to do if it
+# stops.
+#
+# In outline:
+#
+#   rebase   Replays the fork's commits onto the tag and checks the result
+#            with upstream's tests and the proof. Where a commit doesn't
+#            apply, or a check fails, Claude does what needs judgement. This
+#            job can't push anything, and has no secret but Claude's.
+#   push     Makes sure, with a script and no model, that the result changes
+#            nothing that checks the fork, and then pushes it as the branch
+#            perf/<tag>. That push starts the "Fork image" workflow on the
+#            new branch, which runs the tests and the proof again and
+#            publishes an image only if they pass.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Upstream tag to move the fork to, for example v1.17.0"
+        required: true
+        type: string
+      from:
+        description: "Fork branch to move. Leave empty for the newest perf/v… branch"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Trial run: do everything except pushing the result"
+        required: false
+        type: boolean
+        default: false
+      budget:
+        description: "The most one round of Claude's work may cost, in US dollars (there are at most three rounds)"
+        required: false
+        type: string
+        default: "15"
+
+permissions:
+  contents: read
+
+# One move at a time.
+concurrency:
+  group: fork-rebase
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/hashicorp/terraform.git
+  # The version of Claude Code that does the work, and the model it uses.
+  CLAUDE_CODE_VERSION: "2.1.296"
+  MODEL: claude-opus-5-5
+  EFFORT: high
+
+jobs:
+  rebase:
+    name: Replay and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    outputs:
+      from: ${{ steps.plan.outputs.from }}
+      branch: ${{ steps.plan.outputs.branch }}
+    steps:
+      - name: Get this workflow's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - name: Decide what to move, and to where
+        id: plan
+        env:
+          TARGET: ${{ inputs.target }}
+          FROM: ${{ inputs.from }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          repo="https://github.com/${GITHUB_REPOSITORY}.git"
+          if [[ $TARGET =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            branch="perf/$TARGET"
+          elif [[ $TARGET =~ ^[0-9a-f]{40}$ && $DRY_RUN == true ]]; then
+            branch=""
+          else
+            echo "::error::The target has to be a tag of upstream's, like v1.17.0. A full commit hash is accepted for a trial run only."
+            exit 1
+          fi
+          if [ -z "$FROM" ]; then
+            FROM=$(git ls-remote --heads "$repo" 'refs/heads/perf/v*' | awk '{ sub("refs/heads/", "", $2); print $2 }' | python3 control/rebase/newest.py)
+          fi
+          if ! [[ $FROM =~ ^perf/v[0-9A-Za-z.-]+$ ]] || ! git ls-remote --exit-code --heads "$repo" "refs/heads/$FROM" > /dev/null; then
+            echo "::error::There is no branch of the fork called $FROM."
+            exit 1
+          fi
+          if [ -n "$branch" ] && [ "$DRY_RUN" != true ] && git ls-remote --exit-code --heads "$repo" "refs/heads/$branch" > /dev/null; then
+            echo "::error::The branch $branch already exists. A published branch isn't replaced. If it's a failed attempt that nothing was published from, delete it and start again."
+            exit 1
+          fi
+          echo "Moving $FROM to upstream $TARGET${branch:+, as $branch}"
+          {
+            echo "from=$FROM"
+            echo "branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Get the fork's branch
+        env:
+          FROM: ${{ steps.plan.outputs.from }}
+        run: git clone --quiet --single-branch --no-tags --branch "$FROM" "https://github.com/${GITHUB_REPOSITORY}.git" work
+
+      - name: Replay the fork's commits onto the target
+        env:
+          TARGET: ${{ inputs.target }}
+          WORK: work
+          OUT: ${{ runner.temp }}/out
+        run: control/rebase/rebase.sh start "$TARGET"
+
+      # After the replay, because the version of Go to use is upstream's at
+      # the target, and the working tree has that now even if the replay
+      # stopped part way.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: work/.go-version
+          cache: false
+
+      - name: Install Claude Code
+        run: npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      # Claude is only called if the replay stopped or a check fails, and
+      # only if one of the two secrets is set. It works in this job's
+      # checkout, which has no credentials for the repository in it.
+      - name: Finish and check, with Claude for what needs judgement
+        env:
+          WORK: work
+          OUT: ${{ runner.temp }}/out
+          BUDGET_USD: ${{ inputs.budget }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: control/rebase/rebase.sh continue
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/out/summary.md" ]; then
+            cat "$RUNNER_TEMP/out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The move didn't get as far as a summary. The log of this job says why." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Keep the result and the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fork-rebase
+          if-no-files-found: warn
+          # Everything but what the proof built in order to run.
+          path: |
+            ${{ runner.temp }}/out/**
+            !${{ runner.temp }}/out/proof/**
+            ${{ runner.temp }}/out/proof/differences/**
+            !${{ runner.temp }}/out/upstream-tree/**
+
+  push:
+    name: Verify and push
+    needs: rebase
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ inputs.target }}
+      FROM: ${{ needs.rebase.outputs.from }}
+      BRANCH: ${{ needs.rebase.outputs.branch }}
+    steps:
+      # The scripts as they are on this branch, and never as anything in the
+      # candidate would have them.
+      - name: Get this workflow's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fork-rebase
+          path: out
+
+      # Afresh, so that the branch that was moved and the upstream it was
+      # moved to are what GitHub has, and the candidate is the only thing
+      # taken from the other job.
+      - name: Get the fork's branch, the target and the candidate
+        id: get
+        run: |
+          set -euo pipefail
+          git clone --quiet --single-branch --no-tags --branch "$FROM" "https://github.com/${GITHUB_REPOSITORY}.git" work
+          cd work
+          if [[ $TARGET =~ ^[0-9a-f]{40}$ ]]; then
+            git fetch --quiet --no-tags "$UPSTREAM_URL" "$TARGET"
+            new=$TARGET
+          else
+            git fetch --quiet --no-tags "$UPSTREAM_URL" "+refs/tags/$TARGET:refs/tags/$TARGET"
+            new=$(git rev-parse "refs/tags/$TARGET^{commit}")
+          fi
+          for commit in $(grep -v '^[[:space:]]*#' fork-proof/UPSTREAM_BACKPORTS | awk 'NF { print $1 }'); do
+            git fetch --quiet --no-tags "$UPSTREAM_URL" "$commit"
+          done
+          bundle=$(find ../out -name candidate.bundle | head -1)
+          if [ -z "$bundle" ]; then
+            echo "::error::The other job left no candidate."
+            exit 1
+          fi
+          git fetch --quiet "$bundle" refs/heads/candidate:refs/heads/candidate
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Make sure nothing that checks the fork was changed
+        working-directory: work
+        run: ../control/rebase/guard.sh HEAD candidate "${{ steps.get.outputs.new }}"
+
+      - name: Set up the key that can push
+        env:
+          FORK_DEPLOY_KEY: ${{ secrets.FORK_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FORK_DEPLOY_KEY" ]; then
+            {
+              echo "::error::The secret FORK_DEPLOY_KEY isn't set, so the result can't be pushed from here."
+              echo "It has passed every check. To push it yourself, with this run's number:"
+              echo "  gh run download $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY --name fork-rebase --dir fork-rebase"
+              echo "  git fetch \"\$(find fork-rebase -name candidate.bundle)\" refs/heads/candidate:refs/heads/${BRANCH:-candidate}"
+              echo "  git push origin ${BRANCH:-candidate}"
+            } >&2
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          (umask 077 && printf '%s\n' "$FORK_DEPLOY_KEY" > ~/.ssh/fork_deploy_key)
+          # GitHub's host key, as it publishes it at https://api.github.com/meta
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > ~/.ssh/known_hosts_github
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/fork_deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts_github -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      # A push made with the workflow's own token couldn't contain workflow
+      # files, and wouldn't start the workflow that checks and publishes.
+      - name: Push the new branch
+        if: ${{ !inputs.dry_run }}
+        working-directory: work
+        run: |
+          set -euo pipefail
+          git push "git@github.com:${GITHUB_REPOSITORY}.git" "candidate:refs/heads/$BRANCH"
+          {
+            echo "### Pushed \`$BRANCH\`"
+            echo
+            echo "The [Fork image](https://github.com/$GITHUB_REPOSITORY/actions/workflows/fork-image.yml?query=branch%3A${BRANCH//\//%2F}) workflow is now running upstream's tests, the race detector and the proof on it. It publishes \`ghcr.io/${GITHUB_REPOSITORY,,}:${BRANCH//\//-}\` if they all pass, and nothing if they don't."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trial run, so only see whether the push would have been allowed
+        if: ${{ inputs.dry_run }}
+        working-directory: work
+        run: |
+          set -euo pipefail
+          git push --dry-run "git@github.com:${GITHUB_REPOSITORY}.git" "candidate:refs/heads/fork-rebase-trial"
+          {
+            echo "### Trial run: nothing was pushed"
+            echo
+            echo "The result passed every check and could have been pushed${BRANCH:+ as \`$BRANCH\`}. It's in this run's artifact, as \`candidate.bundle\`."
+          } >> "$GITHUB_STEP_SUMMARY"
