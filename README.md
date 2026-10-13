@@ -103,9 +103,16 @@ The summary page of the run says which of these it was.
 | Claude isn't available | Something needed judgement and neither secret for Claude is set. Set one (see below) and run it again. |
 | Stopped after three rounds of Claude's work | It couldn't get the checks to pass. The summary has its notes and the artifact has the logs. Run it again with a higher limit, or finish it by hand (see below). |
 | The guard rejected it | The move needs a change that only a person makes, such as adding a file to `fork-proof/FORK_FILES`. The log says which. Make the change on the fork's current branch and run it again. |
-| The branch already exists | There has already been a move to that tag. If nothing was published from it, delete the branch and run it again. |
+| The branch already exists | There has already been a move to that tag. A fix to it goes on top of it, as a new commit. To start again, when nothing was published from it, the branch has to go first: see below. |
 | The branch has changed since this run started | Something was pushed to the fork's branch while the move was running, and the result doesn't have it. Run it again. |
-| Pushed, and then **Fork image** failed | The branch is there and no image was published. Push a fix to that branch, which runs the checks again, or delete the branch and run this again. |
+| Pushed, and then **Fork image** failed | The branch is there and no image was published. Push a fix to that branch, which runs the checks again. |
+
+A rule of this repository refuses a force-push to this branch or to any
+`perf/v<version>` branch, and refuses deleting one, because other people may
+be building from them. So a branch from a failed attempt can't simply be
+deleted. An owner of the repository can turn the rule off for as long as it
+takes, under **Settings → Rules → Rulesets**, delete the branch, and turn
+the rule on again.
 
 ### What it needs
 
