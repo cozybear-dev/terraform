@@ -5,12 +5,16 @@ package states
 
 import (
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
+	"sync/atomic"
+	"unsafe"
 
 	"github.com/zclconf/go-cty/cty"
-	ctyjson "github.com/zclconf/go-cty/cty/json"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/lang/format"
 	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/providers"
@@ -55,7 +59,85 @@ type ResourceInstanceObject struct {
 	// destroy operations, we need to record the status to ensure a resource
 	// removed from the config will still be destroyed in the same manner.
 	CreateBeforeDestroy bool
+
+	// encoded is a *encodedObject describing the serialized form of Value,
+	// if that's already known, accessed atomically. It's valid only for as
+	// long as Value remains the very same value.
+	encoded unsafe.Pointer
 }
+
+// encodedObject records the serialized form of a particular value of a
+// resource instance object, so that an object which is stored several times
+// without changing, which is by far the most common case during planning,
+// only needs to be serialized once.
+type encodedObject struct {
+	value         cty.Value
+	body          *configschema.Block
+	schemaVersion uint64
+
+	attrsJSON      []byte
+	sensitivePaths []cty.Path
+
+	// verified is true if attrsJSON is known to be what serializing the
+	// value produces, aside from any insignificant whitespace. That's not
+	// certain for an object that was decoded from attrsJSON, because there
+	// are several ways to write the same value.
+	verified bool
+
+	// sortedDependencies is a dependency list that's known to be sorted
+	// already, identified by its first element and its length, if any.
+	sortedDependencies    *addrs.ConfigResource
+	sortedDependenciesLen int
+}
+
+// encodedFor returns what's already known about the serialized form of the
+// object's current value under the given schema, if anything.
+func (o *ResourceInstanceObject) encodedFor(schema providers.Schema) *encodedObject {
+	enc := (*encodedObject)(atomic.LoadPointer(&o.encoded))
+	if enc == nil || enc.body != schema.Body || enc.schemaVersion != uint64(schema.Version) || !sameValue(enc.value, o.Value) {
+		return nil
+	}
+	return enc
+}
+
+// ShareEncodingFrom tells the receiver about the serialized form of the
+// given other object, which avoids serializing the receiver's value again
+// if it turns out to be the very same value. It's always safe to call this,
+// because the information is ignored if the values are different.
+func (o *ResourceInstanceObject) ShareEncodingFrom(other *ResourceInstanceObject) {
+	if o == nil || other == nil {
+		return
+	}
+	if enc := atomic.LoadPointer(&other.encoded); enc != nil {
+		atomic.StorePointer(&o.encoded, enc)
+	}
+}
+
+// sameValue returns true only if the two given values are certain to be
+// equal, including their marks, because one is a copy of the other. Values
+// are immutable, so two that refer to the same underlying data must be equal.
+//
+// This is far cheaper than comparing the values, but it can return false
+// for values that are equal.
+func sameValue(a, b cty.Value) bool {
+	if !valueIsFourWords {
+		return false
+	}
+	return *(*[4]uintptr)(unsafe.Pointer(&a)) == *(*[4]uintptr)(unsafe.Pointer(&b))
+}
+
+// valueIsFourWords is true if cty.Value has the layout that sameValue
+// relies on, which is a type and a value that are each an interface value.
+var valueIsFourWords = func() bool {
+	ty := reflect.TypeOf(cty.Value{})
+	if ty.Size() != 4*unsafe.Sizeof(uintptr(0)) || ty.NumField() != 2 {
+		return false
+	}
+	tyField, vField := ty.Field(0).Type, ty.Field(1).Type
+	return tyField.Kind() == reflect.Struct && tyField.NumField() == 1 &&
+		tyField.Field(0).Type.Kind() == reflect.Interface &&
+		vField.Kind() == reflect.Interface
+}()
 
 // NewResourceInstanceObjectFromIR converts the receiving
 // ImportedResource into a ResourceInstanceObject that has status ObjectReady.
@@ -118,6 +200,11 @@ const (
 // so the caller must not mutate the receiver any further once once this
 // method is called.
 func (o *ResourceInstanceObject) Encode(schema providers.Schema) (*ResourceInstanceObjectSrc, error) {
+	known := o.encodedFor(schema)
+	if known != nil && known.verified {
+		return o.encodeWith(schema, known)
+	}
+
 	// If it contains marks, remove these marks before traversing the
 	// structure with UnknownAsNull, and save the PathValueMarks
 	// so we can save them in state.
@@ -135,17 +222,47 @@ func (o *ResourceInstanceObject) Encode(schema providers.Schema) (*ResourceInsta
 	// for expression evaluation. The apply step should never produce unknown
 	// values, but if it does it's the responsibility of the caller to detect
 	// and raise an error about that.
-	val = cty.UnknownAsNull(val)
+	//
+	// Replacing unknown values means building a whole new value, so we
+	// skip it in the common case where there aren't any.
+	if !val.IsWhollyKnown() {
+		val = cty.UnknownAsNull(val)
+	}
 
-	src, err := ctyjson.Marshal(val, schema.Body.ImpliedType())
+	src, err := marshalJSON(val, schema.Body.ImpliedType())
 	if err != nil {
 		return nil, err
 	}
 
+	if known != nil && equivalentJSON(src, known.attrsJSON) {
+		// The object was decoded from a serialization which we now know
+		// is equivalent to the one we've just produced, so we continue
+		// with that and let the new one be freed, so that everything
+		// derived from the original shares its memory.
+		src = known.attrsJSON
+	}
+	enc := &encodedObject{
+		value:          o.Value,
+		body:           schema.Body,
+		schemaVersion:  uint64(schema.Version),
+		attrsJSON:      src,
+		sensitivePaths: sensitivePaths,
+		verified:       true,
+	}
+	atomic.StorePointer(&o.encoded, unsafe.Pointer(enc))
+
+	return o.encodeWith(schema, enc)
+}
+
+// encodeWith is the remainder of Encode once the serialized form of the
+// object's value has been determined.
+func (o *ResourceInstanceObject) encodeWith(schema providers.Schema, enc *encodedObject) (*ResourceInstanceObjectSrc, error) {
+	src, sensitivePaths := enc.attrsJSON, enc.sensitivePaths
+	var err error
 	var idJSON []byte
 	// If the Identity is known and not null we can marshal it.
 	if !o.Identity.IsNull() && o.Identity.IsWhollyKnown() && schema.Identity != nil {
-		idJSON, err = ctyjson.Marshal(o.Identity, schema.Identity.ImpliedType())
+		idJSON, err = marshalJSON(o.Identity, schema.Identity.ImpliedType())
 		if err != nil {
 			return nil, err
 		}
@@ -158,10 +275,39 @@ func (o *ResourceInstanceObject) Encode(schema providers.Schema) (*ResourceInsta
 	// (more desirable, but tricky for Reasons) or just sort when encoding.
 	// Encoding of instances can happen concurrently, so we must copy the
 	// dependencies to avoid mutating what may be a shared array of values.
-	dependencies := make([]addrs.ConfigResource, len(o.Dependencies))
-	copy(dependencies, o.Dependencies)
-
-	sort.Slice(dependencies, func(i, j int) bool { return dependencies[i].String() < dependencies[j].String() })
+	//
+	// The dependencies are usually already sorted, because they most often
+	// come either from the graph builder or from a prior state, both of
+	// which sort them. In that case we use the given slice directly, since
+	// dependencies are immutable once assigned.
+	dependencies := o.Dependencies
+	dependencyLess := func(a, b addrs.ConfigResource) int {
+		switch {
+		case a.StringLess(b):
+			return -1
+		case b.StringLess(a):
+			return 1
+		default:
+			return 0
+		}
+	}
+	switch {
+	case dependencies == nil:
+		dependencies = []addrs.ConfigResource{}
+	case len(dependencies) != 0 && enc.sortedDependencies == &dependencies[0] && enc.sortedDependenciesLen == len(dependencies):
+		// We've already checked these.
+	case !slices.IsSortedFunc(dependencies, dependencyLess):
+		dependencies = slices.Clone(dependencies)
+		slices.SortFunc(dependencies, dependencyLess)
+	case len(dependencies) != 0:
+		// An object is typically encoded several times with the same
+		// dependencies, and there can be a great many of them, so we
+		// remember that there's no need to check these again.
+		checked := *enc
+		checked.sortedDependencies = &dependencies[0]
+		checked.sortedDependenciesLen = len(dependencies)
+		atomic.CompareAndSwapPointer(&o.encoded, unsafe.Pointer(enc), unsafe.Pointer(&checked))
+	}
 
 	return &ResourceInstanceObjectSrc{
 		SchemaVersion:         uint64(schema.Version),
@@ -176,6 +322,7 @@ func (o *ResourceInstanceObject) Encode(schema providers.Schema) (*ResourceInsta
 		// The cached value must have all its marks since it bypasses decoding.
 		decodeValueCache:    o.Value,
 		decodeIdentityCache: o.Identity,
+		attrsVerified:       len(sensitivePaths) == 0,
 	}, nil
 }
 
@@ -207,6 +354,11 @@ func (o *ResourceInstanceObject) AsTainted() *ResourceInstanceObject {
 // replacing each marked value with some sort of storage placeholder -- before
 // writing a value into the state.
 func unmarkValueForStorage(v cty.Value) (unmarkedV cty.Value, sensitivePaths []cty.Path, err error) {
+	if !marks.ContainsMarked(v) {
+		// Removing marks means building a whole new value, so we skip it
+		// in the common case where there aren't any.
+		return v, nil, nil
+	}
 	val, pvms := v.UnmarkDeepWithPaths()
 	sensitivePaths, withOtherMarks := marks.PathsWithMark(pvms, marks.Sensitive)
 	_, withOtherMarks = marks.PathsWithMark(withOtherMarks, marks.Deprecation)

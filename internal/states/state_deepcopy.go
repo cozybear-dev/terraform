@@ -6,6 +6,7 @@ package states
 import (
 	"maps"
 	"slices"
+	"sync/atomic"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 )
@@ -118,41 +119,39 @@ func (i *ResourceInstance) DeepCopy() *ResourceInstance {
 }
 
 // DeepCopy returns a new resource instance object that contains equivalent data
-// to the receiver but shares no backing memory in common.
+// to the receiver and whose fields can be assigned independently of it.
+//
+// The serialized attributes, identity and private data, the sensitive
+// attribute paths, and the dependencies are all shared with the receiver
+// rather than copied, because together they account for almost the entire
+// size of a state and they are immutable by convention: code that needs a
+// different value for one of those fields must assign a new slice to it,
+// and must never modify the elements of the existing slice in place.
 //
 // As with all methods on ResourceInstanceObjectSrc, this method is not safe to
 // use concurrently with writing to any portion of the recieving data structure.
 // It is the caller's responsibility to ensure mutual exclusion for the duration
-// of the operation, but may then freely modify the receiver and the returned
-// copy independently once this method returns.
+// of the operation, but may then freely assign to the fields of the receiver
+// and the returned copy independently once this method returns.
 func (os *ResourceInstanceObjectSrc) DeepCopy() *ResourceInstanceObjectSrc {
 	if os == nil {
 		return nil
 	}
 
-	attrsFlat := maps.Clone(os.AttrsFlat)
-	attrsJSON := slices.Clone(os.AttrsJSON)
-	identityJSON := slices.Clone(os.IdentityJSON)
-	sensitiveAttrPaths := slices.Clone(os.AttrSensitivePaths)
-	private := slices.Clone(os.Private)
-
-	// Some addrs.Referencable implementations are technically mutable, but
-	// we treat them as immutable by convention and so we don't deep-copy here.
-	dependencies := slices.Clone(os.Dependencies)
-
 	return &ResourceInstanceObjectSrc{
 		Status:                os.Status,
 		SchemaVersion:         os.SchemaVersion,
-		Private:               private,
-		AttrsFlat:             attrsFlat,
-		AttrsJSON:             attrsJSON,
-		AttrSensitivePaths:    sensitiveAttrPaths,
-		Dependencies:          dependencies,
+		Private:               os.Private,
+		AttrsFlat:             maps.Clone(os.AttrsFlat),
+		AttrsJSON:             os.AttrsJSON,
+		AttrSensitivePaths:    os.AttrSensitivePaths,
+		Dependencies:          os.Dependencies,
 		CreateBeforeDestroy:   os.CreateBeforeDestroy,
 		decodeValueCache:      os.decodeValueCache,
-		IdentityJSON:          identityJSON,
+		IdentityJSON:          os.IdentityJSON,
 		IdentitySchemaVersion: os.IdentitySchemaVersion,
 		decodeIdentityCache:   os.decodeIdentityCache,
+		attrsVerified:         os.attrsVerified,
 	}
 }
 
@@ -171,9 +170,11 @@ func (o *ResourceInstanceObject) DeepCopy() *ResourceInstanceObject {
 
 	private := slices.Clone(o.Private)
 
-	// Some addrs.Referenceable implementations are technically mutable, but
-	// we treat them as immutable by convention and so we don't deep-copy here.
-	dependencies := slices.Clone(o.Dependencies)
+	// Dependencies are immutable once assigned, so the copy can refer to
+	// the same ones, which matters because an object can have a great many
+	// of them and is copied several times while it's being planned. The
+	// capacity is limited so that appending to either can't affect the other.
+	dependencies := slices.Clip(o.Dependencies)
 
 	return &ResourceInstanceObject{
 		Value:               o.Value,
@@ -182,6 +183,7 @@ func (o *ResourceInstanceObject) DeepCopy() *ResourceInstanceObject {
 		Private:             private,
 		Dependencies:        dependencies,
 		CreateBeforeDestroy: o.CreateBeforeDestroy,
+		encoded:             atomic.LoadPointer(&o.encoded),
 	}
 }
 
