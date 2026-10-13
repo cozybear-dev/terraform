@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/lang/fastjson"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 	"github.com/zclconf/go-cty/cty"
@@ -95,7 +96,7 @@ func validateDataStoreResourceConfig(req providers.ValidateResourceConfigRequest
 func upgradeDataStoreResourceState(req providers.UpgradeResourceStateRequest) (resp providers.UpgradeResourceStateResponse) {
 	// We've only added new nullable block attributes, so unmarshaling from json
 	// will complete the data structure correctly.
-	val, err := ctyjson.Unmarshal(req.RawStateJSON, dataStoreResourceSchema().Body.ImpliedType())
+	val, err := fastjson.Unmarshal(req.RawStateJSON, dataStoreResourceSchema().Body.ImpliedType())
 	if err != nil {
 		resp.Diagnostics = resp.Diagnostics.Append(err)
 		return resp

@@ -6,6 +6,8 @@ package plans
 import (
 	"github.com/zclconf/go-cty/cty"
 	ctymsgpack "github.com/zclconf/go-cty/cty/msgpack"
+
+	"github.com/hashicorp/terraform/internal/lang/fastmsgpack"
 )
 
 // DynamicValue is the representation in the plan of a value whose type cannot
@@ -56,7 +58,10 @@ func NewDynamicValue(val cty.Value, ty cty.Type) (DynamicValue, error) {
 	}
 
 	// Currently our internal encoding is msgpack, via ctymsgpack.
-	buf, err := ctymsgpack.Marshal(val, ty)
+	// This returns a buffer of exactly the size of what it contains, which
+	// matters because a plan keeps a value like this for every resource
+	// instance.
+	buf, err := fastmsgpack.Marshal(val, ty)
 	if err != nil {
 		return nil, err
 	}
