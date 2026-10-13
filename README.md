@@ -101,6 +101,7 @@ The summary page of the run says which of these it was.
 | What it says | What to do |
 |---|---|
 | Claude isn't available | Something needed judgement and neither secret for Claude is set. Set one (see below) and run it again. |
+| Claude couldn't start | Its credential was refused, or the service couldn't be reached, and the summary quotes the error. Nothing was spent. Put the secret right (see below) and run it again. |
 | Stopped after three rounds of Claude's work | It couldn't get the checks to pass. The summary has its notes and the artifact has the logs. Run it again with a higher limit, or finish it by hand (see below). |
 | The guard rejected it | The move needs a change that only a person makes, such as adding a file to `fork-proof/FORK_FILES`. The log says which. Make the change on the fork's current branch and run it again. |
 | The branch already exists | There has already been a move to that tag. A fix to it goes on top of it, as a new commit. To start again, when nothing was published from it, the branch has to go first: see below. |
@@ -120,7 +121,7 @@ Two secrets, under **Settings → Secrets and variables → Actions**:
 
 | Secret | What for |
 |---|---|
-| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude. The first is an API key from [console.anthropic.com](https://console.anthropic.com), billed for what's used. The second comes from running `claude setup-token` and uses a Claude subscription. One is enough. Without either, the workflow still works whenever nothing needs judgement. |
+| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude. The first is an API key from [console.anthropic.com](https://console.anthropic.com), billed for what's used. The second comes from running `claude setup-token` and uses a Claude subscription. Set one and not both: each kind is refused under the other's name, and the API key is the one that's used if both are there. Without either, the workflow still works whenever nothing needs judgement. |
 | `FORK_DEPLOY_KEY` | The private half of a deploy key of this repository that's allowed to write, which is what pushes the new branch. The workflow's own token can't push a branch that has workflow files in it. |
 
 Give the API key a spending limit. The job it's used in runs code from

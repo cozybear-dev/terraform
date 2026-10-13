@@ -80,6 +80,36 @@ except Exception:
     print("unknown")' "$1" "$2"
 }
 
+# agent_worked says whether a round of Claude's got as far as doing anything.
+# It didn't if its credential was refused or the service couldn't be reached,
+# and then another round would go the same way.
+agent_worked() {
+	python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(1 if d.get("is_error") and not d.get("total_cost_usd") else 0)' "$OUT/agent-$1.json"
+}
+
+# agent_said prints how a round ended, in Claude's words, or the error if it
+# didn't get as far as answering.
+agent_said() {
+	local file=$OUT/agent-$1.json said
+	if [ -s "$file" ]; then
+		said=$(json_field "$file" result)
+		# Stopped by the spending limit, for one, it says nothing.
+		[ "$said" != unknown ] || said="It stopped without a last message ($(json_field "$file" subtype))."
+		echo "$said"
+	else
+		echo "Claude didn't get as far as answering:"
+		echo
+		echo '```'
+		tail -n 20 "${file%.json}.err" 2>/dev/null
+		echo '```'
+	fi
+}
+
 have_agent() {
 	[ "$AGENT" != off ] || return 1
 	command -v claude >/dev/null 2>&1 || return 1
@@ -337,7 +367,7 @@ agent() {
 continue_() {
 	recall
 	cd "$WORK"
-	local round=$ROUNDS reason failed problem outcome=""
+	local round=$ROUNDS reason failed problem said outcome=""
 	while :; do
 		if in_progress; then
 			reason="the replay stopped on a commit that doesn't apply to $TARGET as it is"
@@ -360,6 +390,11 @@ continue_() {
 		round=$((round + 1))
 		remember ROUNDS "$round"
 		agent "$reason" "$round"
+		if ! agent_worked "$round"; then
+			said=$(agent_said "$round")
+			outcome="stopped: $reason, and Claude couldn't start: $(awk 'NF { printf "%s%s", sep, $0; sep = " "; if (++n == 3) exit }' <<< "$said")"
+			break
+		fi
 	done
 
 	summary "$outcome"
@@ -385,10 +420,10 @@ summary() {
 		echo "| From | \`$FROM_NAME\` at \`${FROM_HEAD:0:12}\`, on upstream \`${OLD:0:12}\` |"
 		echo "| To | upstream \`$TARGET\` (\`${NEW:0:12}\`) |"
 		echo "| Outcome | **$outcome** |"
-		local cost=0 file round said
+		local cost=0 file round
 		for file in "$OUT"/agent-*.json; do
 			[ -f "$file" ] || continue
-			cost=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[2]), 2))' "$cost" "$(json_field "$file" total_cost_usd | sed 's/unknown/0/')")
+			cost=$(python3 -c 'import sys; print("%.2f" % (float(sys.argv[1]) + float(sys.argv[2])))' "$cost" "$(json_field "$file" total_cost_usd | sed 's/unknown/0/')")
 		done
 		echo "| Rounds of Claude's work | $ROUNDS$([ "$ROUNDS" = 0 ] || echo ", costing about \$$cost") |"
 		if ! in_progress && git merge-base --is-ancestor "$NEW" candidate 2>/dev/null; then
@@ -458,20 +493,10 @@ summary() {
 		for file in "$OUT"/agent-*.json; do
 			[ -f "$file" ] || continue
 			round=${file##*/agent-}
-			echo "### How round ${round%.json} ended"
+			round=${round%.json}
+			echo "### How round $round ended"
 			echo
-			if [ -s "$file" ]; then
-				said=$(json_field "$file" result)
-				# Stopped by the spending limit, for one, it says nothing.
-				[ "$said" != unknown ] || said="It stopped without a last message ($(json_field "$file" subtype))."
-				echo "$said"
-			else
-				echo "Claude didn't get as far as answering:"
-				echo
-				echo '```'
-				tail -n 20 "${file%.json}.err" 2>/dev/null
-				echo '```'
-			fi
+			agent_said "$round"
 			echo
 		done
 	} > "$OUT/summary.md"
