@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"os"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -43,6 +44,23 @@ func (b *Local) LocalRun(ctx context.Context, op *backendrun.Operation) (*backen
 
 	lr, _, stateMgr, diags := b.localRun(ctx, op)
 	return lr, stateMgr, diags
+}
+
+// envSkipValidate is the name of an environment variable that, when set to
+// "1" or "true", makes operations skip the validation of the configuration
+// that they would otherwise begin with.
+const envSkipValidate = "TF_SKIP_VALIDATE"
+
+// skipValidate returns true if the environment asks for validation to be
+// skipped. Anything other than the two values that ask for it, including a
+// value that was meant to switch it off, leaves validation on.
+func skipValidate() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envSkipValidate))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backendrun.LocalRun, *configload.Snapshot, statemgr.Full, tfdiags.Diagnostics) {
@@ -157,7 +175,17 @@ func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backen
 		}
 
 		// If validation is enabled, validate
-		if b.OpValidation {
+		//
+		// Validation builds and walks a graph of the whole configuration
+		// before the operation builds and walks its own, which for a very
+		// large configuration is a substantial part of the total time.
+		// Setting TF_SKIP_VALIDATE leaves that out. The operation itself
+		// still reports the problems it runs into, including what the
+		// providers say about each resource's configuration, but not the
+		// ones that only validation checks for, and some of those then
+		// surface during the apply instead of before it, so this is only
+		// for a configuration that's validated separately.
+		if b.OpValidation && !skipValidate() {
 			log.Printf("[TRACE] backend/local: running validation operation")
 			// TODO: Implement query validate command. op.Query is false when running the command "terraform validate"
 			opts := &terraform.ValidateOpts{Query: op.Query}
