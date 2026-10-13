@@ -166,6 +166,20 @@ func main() {
 	os.MkdirAll(filepath.Join(t.work, "coverage", "terraform"), 0o755)
 	os.MkdirAll(filepath.Join(t.work, "coverage", "driver"), 0o755)
 
+	// A program built for coverage writes a file that describes itself
+	// into its coverage directory as it starts, unless one is there
+	// already, and Go names the temporary file for that by the clock
+	// alone. Two that start at the same instant clash, and one of them
+	// says so in its output, which then looks like a difference from
+	// upstream. So each is run once here, on its own, before any are run
+	// side by side.
+	if t.cover != "" {
+		command("", []string{"HOME=" + t.work, "CHECKPOINT_DISABLE=1", "GOCOVERDIR=" + filepath.Join(t.work, "coverage", "terraform")}, t.cover, "version")
+	}
+	if t.driverCover != "" {
+		runDriver(t.driverCover, componentModes[0].Name, 1, 0, 1, append(os.Environ(), "GOCOVERDIR="+filepath.Join(t.work, "coverage", "driver")))
+	}
+
 	// The toolchain is the one that built the binaries being compared,
 	// which is the one their source asks for and needn't be the one that
 	// built this program.
