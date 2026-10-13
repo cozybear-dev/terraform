@@ -1,0 +1,10 @@
+# The build needs only the Go source, and doesn't use version control
+# information, so everything else is left out of the build context.
+.git
+.github
+docs
+website
+testing
+**/testdata
+*.tfstate
+*.tfstate.backup
