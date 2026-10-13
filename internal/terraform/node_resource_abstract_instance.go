@@ -695,7 +695,7 @@ func (n *NodeAbstractResourceInstance) refresh(ctx EvalContext, deposedKey state
 
 	// Unmarked before sending to provider
 	var priorMarks []cty.PathValueMarks
-	priorVal, priorMarks = priorVal.UnmarkDeepWithPaths()
+	priorVal, priorMarks = marks.UnmarkDeepWithPaths(priorVal)
 
 	var resp providers.ReadResourceResponse
 	if n.override != nil {
@@ -1220,7 +1220,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		// Since there is no prior state to compare after replacement, we need
 		// a new unmarked config from our original with no ignored values.
 		unmarkedConfigVal := origConfigVal
-		if origConfigVal.ContainsMarked() {
+		if marks.ContainsMarked(origConfigVal) {
 			unmarkedConfigVal, _ = origConfigVal.UnmarkDeep()
 		}
 
@@ -1724,7 +1724,7 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 
 	// Unmark before sending to provider, will re-mark before returning
 	var pvm []cty.PathValueMarks
-	configVal, pvm = configVal.UnmarkDeepWithPaths()
+	configVal, pvm = marks.UnmarkDeepWithPaths(configVal)
 
 	log.Printf("[TRACE] readDataSource: Re-validating config for %s", n.Addr)
 	validateResp := provider.ValidateDataResourceConfig(
@@ -1925,7 +1925,7 @@ func (n *NodeAbstractResourceInstance) planDataSource(ctx EvalContext, checkRule
 	if diags.HasErrors() {
 		return nil, nil, deferred, keyData, diags
 	}
-	unmarkedConfigVal, unmarkedPaths := configVal.UnmarkDeepWithPaths()
+	unmarkedConfigVal, unmarkedPaths := marks.UnmarkDeepWithPaths(configVal)
 
 	check, nested := n.nestedInCheckBlock()
 	if nested {
@@ -2681,8 +2681,8 @@ func (n *NodeAbstractResourceInstance) apply(
 	// ensure those are stripped out before sending
 	// this to the provider
 	unmarkedConfigVal, _ := configVal.UnmarkDeep()
-	unmarkedBefore, beforePaths := change.Before.UnmarkDeepWithPaths()
-	unmarkedAfter, afterPaths := change.After.UnmarkDeepWithPaths()
+	unmarkedBefore, beforePaths := marks.UnmarkDeepWithPaths(change.Before)
+	unmarkedAfter, afterPaths := marks.UnmarkDeepWithPaths(change.After)
 
 	// If we have an Update action, our before and after values are equal,
 	// and only differ on their sensitivity, the newVal is the after val
@@ -3332,7 +3332,7 @@ func (n *NodeAbstractResourceInstance) planActionTrigger(ctx EvalContext, resRep
 		return
 	}
 
-	unmarkedConfig, _ := actionVal.UnmarkDeepWithPaths()
+	unmarkedConfig, _ := marks.UnmarkDeepWithPaths(actionVal)
 
 	resp := provider.PlanAction(providers.PlanActionRequest{
 		ActionType:         actionRef.actionNode.Addr.Action.Type,

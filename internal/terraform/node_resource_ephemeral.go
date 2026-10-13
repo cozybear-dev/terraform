@@ -85,7 +85,7 @@ func ephemeralResourceOpen(ctx EvalContext, inp ephemeralResourceInput) (*provid
 		return nil, diags
 	}
 
-	unmarkedConfigVal, configMarks := configVal.UnmarkDeepWithPaths()
+	unmarkedConfigVal, configMarks := marks.UnmarkDeepWithPaths(configVal)
 
 	if !unmarkedConfigVal.IsWhollyKnown() {
 		log.Printf("[DEBUG] ehpemeralResourceOpen: configuration for %s contains unknown values, cannot open resource", inp.addr)

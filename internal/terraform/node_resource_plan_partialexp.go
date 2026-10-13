@@ -220,7 +220,7 @@ func (n *nodePlannablePartialExpandedResource) managedResourceExecute(ctx EvalCo
 		return &change, diags
 	}
 
-	unmarkedConfigVal, unmarkedPaths := configVal.UnmarkDeepWithPaths()
+	unmarkedConfigVal, unmarkedPaths := marks.UnmarkDeepWithPaths(configVal)
 	priorVal := cty.NullVal(schema.Body.ImpliedType()) // we don't have any specific prior value to use
 	proposedNewVal := objchange.ProposedNew(schema.Body, priorVal, unmarkedConfigVal)
 
@@ -379,7 +379,7 @@ func (n *nodePlannablePartialExpandedResource) dataResourceExecute(ctx EvalConte
 	// the provider. BTW, this is about where we start mirroring planDataSource's
 	// logic for a data source with unknown config, which is sort of what we
 	// are, after all.
-	unmarkedConfigVal, unmarkedPaths := configVal.UnmarkDeepWithPaths()
+	unmarkedConfigVal, unmarkedPaths := marks.UnmarkDeepWithPaths(configVal)
 	proposedNewVal := objchange.PlannedDataResourceObject(schema.Body, unmarkedConfigVal)
 	proposedNewVal = proposedNewVal.MarkWithPaths(unmarkedPaths)
 	if sensitivePaths := schema.Body.SensitivePaths(proposedNewVal, nil); len(sensitivePaths) != 0 {

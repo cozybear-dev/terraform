@@ -169,3 +169,70 @@ func MarksEqual(a, b []cty.PathValueMarks) bool {
 
 	return true
 }
+
+// SameAsMarking returns true if marking a value with the given path marks
+// and then also marking each of the given paths as sensitive would give
+// exactly the marks described by want, assuming that neither want nor pvms
+// mentions a path more than once.
+//
+// This is for recognizing when re-applying marks to a value would just
+// reproduce an already-marked version of that value which the caller still
+// has, in which case building another one is unnecessary. It can return
+// false when the result would in fact be the same, so it's only suitable
+// for deciding whether to skip redundant work.
+func SameAsMarking(want, pvms []cty.PathValueMarks, sensitive []cty.Path) bool {
+	// This compares every path with every other, so it's only worthwhile
+	// for the usual case where there are few of them.
+	const maxPaths = 32
+	if len(want) > maxPaths || len(pvms) > len(want) || len(sensitive) > maxPaths {
+		return false
+	}
+
+	matched := 0
+	for _, w := range want {
+		wantMarks := w.Marks
+		var gotMarks cty.ValueMarks
+		for _, pvm := range pvms {
+			if pvm.Path.Equals(w.Path) {
+				gotMarks = pvm.Marks
+				matched++
+				break
+			}
+		}
+		_, gotSensitive := gotMarks[Sensitive]
+		if !gotSensitive {
+			for _, path := range sensitive {
+				if path.Equals(w.Path) {
+					withSensitive := cty.NewValueMarks(Sensitive)
+					for mark := range gotMarks {
+						withSensitive[mark] = struct{}{}
+					}
+					gotMarks = withSensitive
+					break
+				}
+			}
+		}
+		if len(gotMarks) == 0 || !gotMarks.Equal(wantMarks) {
+			return false
+		}
+	}
+	if matched != len(pvms) {
+		// Some of the given marks are for paths that aren't wanted.
+		return false
+	}
+	// Every sensitive path must also be one of the wanted paths, each of
+	// which we've now confirmed has exactly the marks it would be given.
+	for _, path := range sensitive {
+		found := false
+		for _, w := range want {
+			if w.Path.Equals(path) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
