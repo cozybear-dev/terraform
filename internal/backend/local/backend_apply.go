@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -500,6 +501,16 @@ func (b *Local) opApply(
 	// The hook might still be writing an intermediate snapshot, which must
 	// not be allowed to replace the final state we're about to write.
 	stateHook.Wait()
+	if applyState != nil && countResourceInstances(applyState, stateLargeInstanceCount) >= stateLargeInstanceCount {
+		// Nothing else will evaluate expressions against this state, but it
+		// might still be holding the decoded form of every object that was
+		// referred to while applying, and applying leaves a lot of other
+		// garbage behind too. Writing a large state needs a significant
+		// amount of memory of its own, so we reclaim what we can first
+		// rather than letting one be added to the other.
+		applyState.ForgetDecodedValues()
+		debug.FreeOSMemory()
+	}
 	logging.Phase("apply: complete")
 	err := statemgr.WriteAndPersist(opState, applyState, schemas)
 	logging.Phase("write state")
