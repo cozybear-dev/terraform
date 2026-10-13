@@ -804,6 +804,16 @@ func (n *NodeAbstractResourceInstance) refresh(ctx EvalContext, deposedKey state
 		}
 	}
 
+	unchanged := false
+	if newState.RawEquals(priorVal) {
+		// The object hasn't changed, which is the usual case. The provider's
+		// response is a separate copy of the whole object, so we continue
+		// with the equal value we already had instead and let the copy be
+		// freed, which matters when there are very many objects.
+		newState = priorVal
+		unchanged = true
+	}
+
 	ret := state.DeepCopy()
 	ret.Value = newState
 	ret.Private = resp.Private
@@ -822,6 +832,14 @@ func (n *NodeAbstractResourceInstance) refresh(ctx EvalContext, deposedKey state
 	// configuration, as well as any marks from the schema which were not in
 	// the prior state. New marks may appear when the prior state was from an
 	// import operation, or if the provider added new marks to the schema.
+	if unchanged && len(priorMarks) != 0 && marks.SameAsMarking(priorMarks, priorMarks, schema.Body.SensitivePaths(priorVal, nil)) {
+		// Marking the unchanged value would just reproduce the value we
+		// started with, so we continue with that one. As well as avoiding
+		// the work of building it, that lets the object keep the serialized
+		// form it already has when it's written to the state.
+		ret.Value = state.Value
+		return ret, deferred, diags
+	}
 	ret.Value = ret.Value.MarkWithPaths(priorMarks)
 	if moreSensitivePaths := schema.Body.SensitivePaths(ret.Value, nil); len(moreSensitivePaths) != 0 {
 		ret.Value = marks.MarkPaths(ret.Value, marks.Sensitive, moreSensitivePaths)
@@ -989,8 +1007,8 @@ func (n *NodeAbstractResourceInstance) plan(
 	// Create an unmarked version of our config val and our prior val.
 	// Store the paths for the config val to re-mark after we've sent things
 	// over the wire.
-	unmarkedConfigVal, unmarkedPaths := configValIgnored.UnmarkDeepWithPaths()
-	unmarkedPriorVal, _ := priorVal.UnmarkDeepWithPaths()
+	unmarkedConfigVal, unmarkedPaths := marks.UnmarkDeepWithPaths(configValIgnored)
+	unmarkedPriorVal, priorPaths := marks.UnmarkDeepWithPaths(priorVal)
 
 	// remove computable block values from config
 	unmarkedConfigVal = objchange.PrepareComputedBlocks(schema.Body, unmarkedConfigVal)
@@ -1173,12 +1191,29 @@ func (n *NodeAbstractResourceInstance) plan(
 	// here. We remove the ephemeral marks, the provider is expected to return null
 	// for write-only attributes (the only place where ephemeral values are allowed).
 	// This is verified in objchange.AssertPlanValid already.
+	unchanged := false
+	if plannedNewVal.RawEquals(unmarkedPriorVal) {
+		// Nothing is changing, which is the usual case. The provider's
+		// response is a separate copy of the whole object, so we continue
+		// with the equal value we already had instead and let the copy be
+		// freed, which matters when there are very many objects.
+		plannedNewVal = unmarkedPriorVal
+		unchanged = true
+	}
 	unmarkedPlannedNewVal := plannedNewVal
 	unmarkedPaths = marks.RemoveAll(unmarkedPaths, marks.Ephemeral)
 
-	plannedNewVal = plannedNewVal.MarkWithPaths(unmarkedPaths)
-	if sensitivePaths := schema.Body.SensitivePaths(plannedNewVal, nil); len(sensitivePaths) != 0 {
-		plannedNewVal = marks.MarkPaths(plannedNewVal, marks.Sensitive, sensitivePaths)
+	if unchanged && len(priorPaths) != 0 && marks.SameAsMarking(priorPaths, unmarkedPaths, schema.Body.SensitivePaths(unmarkedPriorVal, nil)) {
+		// Marking the unchanged value would just reproduce the prior value,
+		// so we continue with that one. As well as avoiding the work of
+		// building it, that lets the object keep the serialized form it
+		// already has when it's written to the state.
+		plannedNewVal = priorVal
+	} else {
+		plannedNewVal = plannedNewVal.MarkWithPaths(unmarkedPaths)
+		if sensitivePaths := schema.Body.SensitivePaths(plannedNewVal, nil); len(sensitivePaths) != 0 {
+			plannedNewVal = marks.MarkPaths(plannedNewVal, marks.Sensitive, sensitivePaths)
+		}
 	}
 
 	writeOnlyPaths := schema.Body.WriteOnlyPaths(plannedNewVal, nil)
@@ -1435,6 +1470,9 @@ func (n *NodeAbstractResourceInstance) plan(
 		Private:  plannedPrivate,
 		Identity: resp.PlannedIdentity,
 	}
+	// The planned value is the same as the current one when nothing is
+	// changing, in which case it doesn't need to be serialized again.
+	state.ShareEncodingFrom(currentState)
 
 	return plan, state, deferred, diags
 }
@@ -3059,8 +3097,14 @@ func resourceInstancePrevRunAddr(ctx EvalContext, currentAddr addrs.AbsResourceI
 
 func getAction(addr addrs.AbsResourceInstance, priorVal, plannedNewVal cty.Value, createBeforeDestroy bool, writeOnly cty.PathSet, forceReplace bool, reqRep cty.PathSet) (action plans.Action, actionReason plans.ResourceInstanceChangeActionReason) {
 	// Unmark for this test for value equality.
-	eqV := plannedNewVal.Equals(priorVal)
-	eq := eqV.IsKnown() && eqV.True()
+	// The usual case is that nothing has changed, which we can recognize
+	// much more cheaply than with a general equality test because that
+	// builds a new value as its result at every level of nesting.
+	eq := plannedNewVal.RawEquals(priorVal) && valueWhollyKnown(priorVal)
+	if !eq {
+		eqV := plannedNewVal.Equals(priorVal)
+		eq = eqV.IsKnown() && eqV.True()
+	}
 
 	switch {
 	case priorVal.IsNull():
@@ -3491,4 +3535,35 @@ func resourceLifecycleForget(config *configs.Resource) bool {
 		}
 	}
 	return false
+}
+
+// valueWhollyKnown returns true if the given value and everything nested
+// inside it is known. It's equivalent to the IsWhollyKnown method of
+// cty.Value, but it doesn't need to track the path to each nested value and
+// so does considerably less work.
+func valueWhollyKnown(v cty.Value) bool {
+	v, _ = v.Unmark()
+	if !v.IsKnown() {
+		return false
+	}
+	if v.IsNull() {
+		return true
+	}
+	ty := v.Type()
+	switch {
+	case ty.IsObjectType():
+		for name := range ty.AttributeTypes() {
+			if !valueWhollyKnown(v.GetAttr(name)) {
+				return false
+			}
+		}
+	case ty.IsListType(), ty.IsSetType(), ty.IsMapType(), ty.IsTupleType():
+		for it := v.ElementIterator(); it.Next(); {
+			_, ev := it.Element()
+			if !valueWhollyKnown(ev) {
+				return false
+			}
+		}
+	}
+	return true
 }

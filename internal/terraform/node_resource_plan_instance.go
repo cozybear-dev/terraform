@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/hashicorp/hcl/v2"
@@ -1218,6 +1219,16 @@ func mergeDeps(a, b []addrs.ConfigResource) []addrs.ConfigResource {
 		return a
 	}
 
+	// The dependencies we're given are almost always already sorted, because
+	// they come from the graph builder and from the prior state, and very
+	// often they are exactly the same. In that case we can find the union
+	// with a single pass over both, and when one of the arguments already is
+	// the union we return it directly so that the instances of a resource
+	// can all continue to share a single slice.
+	if merged, ok := mergeSortedDeps(a, b); ok {
+		return merged
+	}
+
 	set := make(map[string]addrs.ConfigResource)
 
 	for _, dep := range a {
@@ -1236,9 +1247,117 @@ func mergeDeps(a, b []addrs.ConfigResource) []addrs.ConfigResource {
 	return newDeps
 }
 
+// mergeSortedDeps is an implementation of mergeDeps for the common case
+// where both arguments are sorted by the string representation of their
+// elements, with no duplicates. It returns false if that isn't true, in
+// which case the caller must use the general implementation.
+func mergeSortedDeps(a, b []addrs.ConfigResource) ([]addrs.ConfigResource, bool) {
+	if len(a) == len(b) && &a[0] == &b[0] {
+		return a, true
+	}
+	strictlySorted := func(deps []addrs.ConfigResource) bool {
+		for i := 1; i < len(deps); i++ {
+			if !deps[i-1].StringLess(deps[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	// Comparing the string representations of addresses is relatively
+	// expensive, and an object can have a great many dependencies, so we
+	// first check for the two being the same, which is by far the most
+	// common case and is much cheaper to establish. If they are then only
+	// one of them needs to be checked for being sorted.
+	if len(a) == len(b) {
+		same := true
+		for i := range a {
+			if !a[i].Equal(b[i]) {
+				same = false
+				break
+			}
+		}
+		if same {
+			if strictlySorted(a) {
+				return a, true
+			}
+			return nil, false
+		}
+	}
+	if !strictlySorted(a) || !strictlySorted(b) {
+		return nil, false
+	}
+
+	// First we'll find how many elements the union has, which tells us
+	// whether it's the same as either of the arguments.
+	i, j, count := 0, 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i].StringLess(b[j]):
+			i++
+		case b[j].StringLess(a[i]):
+			j++
+		default:
+			i++
+			j++
+		}
+		count++
+	}
+	count += len(a) - i + len(b) - j
+	switch count {
+	case len(a):
+		return a, true
+	case len(b):
+		return b, true
+	}
+
+	merged := make([]addrs.ConfigResource, 0, count)
+	i, j = 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i].StringLess(b[j]):
+			merged = append(merged, a[i])
+			i++
+		case b[j].StringLess(a[i]):
+			merged = append(merged, b[j])
+			j++
+		default:
+			merged = append(merged, a[i])
+			i++
+			j++
+		}
+	}
+	merged = append(merged, a[i:]...)
+	merged = append(merged, b[j:]...)
+	return merged, true
+}
+
 func depsEqual(a, b []addrs.ConfigResource) bool {
 	if len(a) != len(b) {
 		return false
+	}
+	if len(a) == 0 || &a[0] == &b[0] {
+		return true
+	}
+
+	// If both are already sorted, as they almost always are, then we can
+	// compare them directly.
+	lessOrEqual := func(x, y addrs.ConfigResource) int {
+		switch {
+		case x.StringLess(y):
+			return -1
+		case y.StringLess(x):
+			return 1
+		default:
+			return 0
+		}
+	}
+	if slices.IsSortedFunc(a, lessOrEqual) && slices.IsSortedFunc(b, lessOrEqual) {
+		for i := range a {
+			if !a[i].Equal(b[i]) {
+				return false
+			}
+		}
+		return true
 	}
 
 	// Because we need to sort the deps to compare equality, make shallow
