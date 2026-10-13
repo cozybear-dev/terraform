@@ -3,10 +3,6 @@
 
 package dag
 
-import (
-	"slices"
-)
-
 // StronglyConnected returns the list of strongly connected components
 // within the Graph g. This information is primarily used by this package
 // for cycle detection, but strongly connected components have widespread
@@ -15,6 +11,7 @@ func StronglyConnected(g *Graph) [][]Vertex {
 	acct := sccAcct{
 		NextIndex:   1,
 		VertexIndex: make(map[Vertex]int, g.VertexCount()),
+		onStack:     make(map[Vertex]struct{}),
 	}
 	for v := range g.VerticesSeq() {
 		// Recurse on any non-visited nodes
@@ -67,6 +64,11 @@ type sccAcct struct {
 	VertexIndex map[Vertex]int
 	Stack       []Vertex
 	SCC         [][]Vertex
+
+	// onStack has the vertices that are in Stack, so that finding out
+	// whether one is there doesn't mean searching the whole stack, which
+	// for a deep graph can hold most of the vertices.
+	onStack map[Vertex]struct{}
 }
 
 // visit assigns an index and pushes a vertex onto the stack
@@ -81,6 +83,7 @@ func (s *sccAcct) visit(v Vertex) int {
 // push adds a vertex to the stack
 func (s *sccAcct) push(n Vertex) {
 	s.Stack = append(s.Stack, n)
+	s.onStack[n] = struct{}{}
 }
 
 // pop removes a vertex from the stack
@@ -91,10 +94,12 @@ func (s *sccAcct) pop() Vertex {
 	}
 	vertex := s.Stack[n-1]
 	s.Stack = s.Stack[:n-1]
+	delete(s.onStack, vertex)
 	return vertex
 }
 
 // inStack checks if a vertex is in the stack
 func (s *sccAcct) inStack(needle Vertex) bool {
-	return slices.Contains(s.Stack, needle)
+	_, ok := s.onStack[needle]
+	return ok
 }

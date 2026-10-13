@@ -181,6 +181,16 @@ func (g *AcyclicGraph) MatchDescendant(v Vertex, match func(Vertex) bool) bool {
 //
 // Complexity: O(V(V+E)), or asymptotically O(VE)
 func (g *AcyclicGraph) TransitiveReduction() {
+	if g.transitiveReductionIndexed() {
+		return
+	}
+	g.transitiveReductionGeneric()
+}
+
+// transitiveReductionGeneric is the straightforward implementation of
+// TransitiveReduction, which works directly with the graph's own data
+// structures and so tolerates graphs that aren't valid DAGs.
+func (g *AcyclicGraph) transitiveReductionGeneric() {
 	// For each vertex u in graph g, do a DFS starting from each vertex
 	// v such that the edge (u,v) exists (v is a direct descendant of u).
 	//
@@ -241,11 +251,12 @@ func (g *AcyclicGraph) Validate() error {
 		}
 	}
 
-	// Look for cycles to self
-	for _, e := range g.Edges() {
-		if e.Source == e.Target {
+	// Look for cycles to self. A graph can have a great many edges, so we
+	// ask about each vertex directly rather than enumerating all of them.
+	for from, tos := range g.edgesFrom {
+		if tos.Contains(from) {
 			err = errors.Join(err, fmt.Errorf(
-				"Self reference: %s", e.Source.Name()))
+				"Self reference: %s", from.Name()))
 		}
 	}
 

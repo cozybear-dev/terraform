@@ -6,7 +6,10 @@ package dag
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"sort"
+	"sync"
+	"sync/atomic"
 )
 
 // Graph is used to represent a dependency graph.
@@ -153,6 +156,96 @@ func (g *Graph) Connect(source, target Vertex) {
 		g.edgesTo[target] = s
 	}
 	s.Add(source)
+}
+
+// ConnectAll adds an edge from each of the given sources to each of the
+// corresponding targets, with the same result as calling Connect for each
+// pair. The sources must all be distinct.
+//
+// A graph with many resource instances can have millions of edges, and each
+// one must be recorded both with its source and with its target. This does
+// that using all of the available CPUs, which is possible because the edges
+// of different vertices are stored separately.
+func (g *Graph) ConnectAll(sources []Vertex, targets [][]Vertex) {
+	g.init()
+
+	// First, sequentially, we make sure that every vertex involved has
+	// somewhere to store its edges, and group the edges by target.
+	targetIndex := make(map[Vertex]int32)
+	var targetList []Vertex
+	var incoming [][]Vertex
+	for i, source := range sources {
+		if len(targets[i]) == 0 {
+			continue
+		}
+		if _, ok := g.edgesFrom[source]; !ok {
+			g.edgesFrom[source] = NewVertexSet()
+		}
+		for _, target := range targets[i] {
+			idx, ok := targetIndex[target]
+			if !ok {
+				idx = int32(len(targetList))
+				targetIndex[target] = idx
+				targetList = append(targetList, target)
+				incoming = append(incoming, nil)
+				if _, ok := g.edgesTo[target]; !ok {
+					g.edgesTo[target] = NewVertexSet()
+				}
+			}
+			incoming[idx] = append(incoming[idx], source)
+		}
+	}
+
+	// Then each set of edges is updated by exactly one goroutine.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		parallelFor(len(sources), func(i int) {
+			if len(targets[i]) == 0 {
+				return
+			}
+			set := g.edgesFrom[sources[i]]
+			for _, target := range targets[i] {
+				set.Add(target)
+			}
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		parallelFor(len(targetList), func(i int) {
+			set := g.edgesTo[targetList[i]]
+			for _, source := range incoming[i] {
+				set.Add(source)
+			}
+		})
+	}()
+	wg.Wait()
+}
+
+// parallelFor calls fn for each integer from zero up to but not including n,
+// from several goroutines at once.
+func parallelFor(n int, fn func(i int)) {
+	const batch = 64
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n/batch+1) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				end := int(next.Add(batch))
+				start := end - batch
+				if start >= n {
+					return
+				}
+				for i := start; i < min(end, n); i++ {
+					fn(i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // Subsume imports all of the nodes and edges from the given graph into the
