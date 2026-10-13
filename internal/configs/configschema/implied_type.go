@@ -4,6 +4,10 @@
 package configschema
 
 import (
+	"runtime"
+	"sync"
+	"weak"
+
 	"github.com/hashicorp/hcl/v2/hcldec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -20,9 +24,34 @@ import (
 // inconsistent. Code that creates configschema.Block objects should be
 // tested using the InternalValidate method to detect any inconsistencies
 // that would cause this method to fall back on defaults and assumptions.
+//
+// The result is remembered for the lifetime of the block, because building
+// it is expensive for a large schema and callers typically ask for the type
+// of the same schema once for each resource instance they process. A block
+// therefore must not be modified once ImpliedType has been called on it.
 func (b *Block) ImpliedType() cty.Type {
-	return b.specType().WithoutOptionalAttributesDeep()
+	if b == nil {
+		return cty.EmptyObject
+	}
+
+	key := weak.Make(b)
+	if ty, ok := impliedTypes.Load(key); ok {
+		return ty.(cty.Type)
+	}
+
+	ty := b.specType().WithoutOptionalAttributesDeep()
+	if _, loaded := impliedTypes.LoadOrStore(key, ty); !loaded {
+		// Forget the type once the block itself is no longer reachable.
+		runtime.AddCleanup(b, func(key weak.Pointer[Block]) {
+			impliedTypes.Delete(key)
+		}, key)
+	}
+	return ty
 }
+
+// impliedTypes remembers the result of Block.ImpliedType for each block
+// it has been called on, as a map from weak.Pointer[Block] to cty.Type.
+var impliedTypes sync.Map
 
 // specType returns the cty.Type used for decoding a configuration
 // block using the receiving block schema. This is the type used internally by
