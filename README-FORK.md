@@ -113,13 +113,15 @@ it carries in `fork-proof/UPSTREAM_BACKPORTS`.
   fork as [a stack of patches](#how-the-fork-is-maintained) on that version,
   and when upstream releases the next, the fork gets a new branch.
   [One workflow](#moving-to-a-newer-version-of-upstream) does that.
-- **`perf/large-state` is retired.** It is where the work was done, on
+- **`perf/large-state` is gone.** It is where the work was first done, on
   upstream's development branch as it was at the time (`main` at
-  `0828b3d2d7cb`, which calls itself `1.18.0-dev`), and it's kept for the
-  history of how the changes were arrived at. Nothing is published from it
-  any more. Its last image, `perf-large-state-f507e5f186b0`, has the same
-  changes as the first branch for a version, `perf/v1.17.0-rc1`, had when
-  that was first published, on a different upstream.
+  `0828b3d2d7cb`, which calls itself `1.18.0-dev`). It was retired when the
+  first branch for a version, `perf/v1.17.0-rc1`, was published, and has
+  been deleted since. An image tagged `perf-large-state` is from it, and
+  nothing new is published under that name: its last one,
+  `perf-large-state-f507e5f186b0`, has the same changes as
+  `perf/v1.17.0-rc1` had when that was first published, on a different
+  upstream.
 - **There is no branch for 1.16**, and none is planned. The fork's graph
   patches are written for the graph package as upstream rewrote it for
   1.17, and 1.16 has the earlier one, whose walker also does things that
@@ -862,9 +864,7 @@ docker run --rm -it -v "$PWD":/workspace -w /workspace \
 | This document, the image and its workflow | `README-FORK.md`, `Dockerfile.fork`, `.github/workflows/fork-image.yml` |
 
 A branch for a version of upstream has one commit for each area, listed in
-[How the fork is maintained](#how-the-fork-is-maintained). On the retired
-branch `perf/large-state`, `git log 0828b3d2d7cb..perf/large-state` has the
-steps in the order they were taken.
+[How the fork is maintained](#how-the-fork-is-maintained).
 
 ### Use of `unsafe`
 
