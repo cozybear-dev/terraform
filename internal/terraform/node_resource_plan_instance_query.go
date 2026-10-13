@@ -8,6 +8,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -57,7 +58,7 @@ func (n *NodePlannableResourceInstance) listResourceExecute(ctx EvalContext) (di
 	}
 
 	// Unmark before sending to provider
-	unmarkedBlockVal, _ := blockVal.UnmarkDeepWithPaths()
+	unmarkedBlockVal, _ := marks.UnmarkDeepWithPaths(blockVal)
 	configKnown := blockVal.IsWhollyKnown()
 	if !configKnown {
 		diags = diags.Append(fmt.Errorf("config is not known"))

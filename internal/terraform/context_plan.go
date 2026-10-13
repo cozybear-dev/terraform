@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/globalref"
+	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/moduletest/mocking"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/policy"
@@ -417,7 +418,7 @@ The -target option is not for routine use, and is provided only for exceptional 
 		// gathered marks during evaluation. We must separate the value from
 		// its marks here to maintain compatibility with plans.DynamicValue,
 		// which cannot represent marks.
-		value, pvm := iv.Value.UnmarkDeepWithPaths()
+		value, pvm := marks.UnmarkDeepWithPaths(iv.Value)
 
 		// We use cty.DynamicPseudoType here so that we'll save both the
 		// value _and_ its dynamic type in the plan, so we can recover

@@ -10,7 +10,7 @@ import (
 
 // valueMarksEqual compares the marks of 2 cty.Values for equality.
 func valueMarksEqual(a, b cty.Value) bool {
-	_, aMarks := a.UnmarkDeepWithPaths()
-	_, bMarks := b.UnmarkDeepWithPaths()
+	_, aMarks := marks.UnmarkDeepWithPaths(a)
+	_, bMarks := marks.UnmarkDeepWithPaths(b)
 	return marks.MarksEqual(aMarks, bMarks)
 }

@@ -136,3 +136,48 @@ func NewDeprecation(message string, originDescription string) DeprecationMark {
 		OriginDescription: originDescription,
 	}
 }
+
+// ContainsMarked returns true if the given value or any value nested inside
+// it has any marks. It's equivalent to the ContainsMarked method of
+// cty.Value, but it doesn't need to track the path to each nested value and
+// so does considerably less work, which matters for callers that check
+// every object in a large state.
+func ContainsMarked(v cty.Value) bool {
+	if v.IsMarked() {
+		return true
+	}
+	if !v.IsKnown() || v.IsNull() {
+		return false
+	}
+	ty := v.Type()
+	switch {
+	case ty.IsObjectType():
+		for name := range ty.AttributeTypes() {
+			if ContainsMarked(v.GetAttr(name)) {
+				return true
+			}
+		}
+	case ty.IsListType(), ty.IsSetType(), ty.IsMapType(), ty.IsTupleType():
+		if ty.IsCollectionType() && ty.ElementType().IsPrimitiveType() && v.LengthInt() == 0 {
+			return false
+		}
+		for it := v.ElementIterator(); it.Next(); {
+			ek, ev := it.Element()
+			if ContainsMarked(ek) || ContainsMarked(ev) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// UnmarkDeepWithPaths is equivalent to the UnmarkDeepWithPaths method of
+// cty.Value, but returns the given value itself without doing any other
+// work if it has no marks at all, which is the common case. The method
+// otherwise builds a complete new copy of the value regardless.
+func UnmarkDeepWithPaths(v cty.Value) (cty.Value, []cty.PathValueMarks) {
+	if !ContainsMarked(v) {
+		return v, nil
+	}
+	return v.UnmarkDeepWithPaths()
+}

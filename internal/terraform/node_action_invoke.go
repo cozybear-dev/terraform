@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/lang/ephemeral"
+	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -252,7 +253,7 @@ func (n *nodeActionPlanInvoke) planAction(ctx EvalContext, config *configs.Actio
 		})
 	}
 
-	unmarkedConfig, _ := configVal.UnmarkDeepWithPaths()
+	unmarkedConfig, _ := marks.UnmarkDeepWithPaths(configVal)
 
 	if !unmarkedConfig.IsWhollyKnown() {
 		// we're not actually planning or applying changes from the
