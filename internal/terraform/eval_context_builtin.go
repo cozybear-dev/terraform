@@ -555,6 +555,20 @@ func (ctx *BuiltinEvalContext) evaluationExternalFunctions() lang.ExternalFuncs 
 		return ret
 	}
 
+	// The result depends only on the module's configuration and on objects
+	// that are shared by all of the evaluation contexts in a graph walk, so
+	// we build the functions only once for each module and then share them,
+	// which also allows the scopes for that module to share a function table.
+	return ctx.FunctionResults.SharedExternalFuncs(cfg, func() lang.ExternalFuncs {
+		return ctx.buildEvaluationExternalFunctions(cfg)
+	})
+}
+
+// buildEvaluationExternalFunctions is the main implementation of
+// evaluationExternalFunctions, for a module that has provider requirements.
+func (ctx *BuiltinEvalContext) buildEvaluationExternalFunctions(cfg *configs.Config) lang.ExternalFuncs {
+	ret := lang.ExternalFuncs{}
+
 	reqs := cfg.Module.ProviderRequirements.RequiredProviders
 	ret.Provider = make(map[string]map[string]function.Function, len(reqs))
 

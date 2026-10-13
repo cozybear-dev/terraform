@@ -10,6 +10,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/zclconf/go-cty/cty"
@@ -29,6 +30,54 @@ type FunctionResults struct {
 	// results stores the prior result from a function call, keyed by
 	// the hash of the function name and arguments.
 	results map[[sha256.Size]byte]priorResultHash
+
+	// tables remembers the function tables built by Scope.Functions for
+	// scopes that share this results table, as a map from functionTableKey
+	// to map[string]function.Function.
+	tables sync.Map
+
+	// externalFuncs remembers the collections of external functions built
+	// by SharedExternalFuncs, as a map from the caller's key to ExternalFuncs.
+	externalFuncs sync.Map
+}
+
+// functionTableKey represents all of the settings of a [Scope] that affect
+// which functions [Scope.Functions] returns, aside from the external
+// functions and the function results table.
+type functionTableKey struct {
+	baseDir       string
+	forProvider   bool
+	consoleMode   bool
+	pureOnly      bool
+	planTimestamp time.Time
+	externalFuncs any
+}
+
+// SharedExternalFuncs returns the collection of external functions
+// identified by the given key, calling build to construct it if this is the
+// first request for that key.
+//
+// The key must be a comparable value which, together with this results
+// table, completely determines what build would return, such as a pointer to
+// the configuration of the module that the functions are for. Scopes that
+// use the same results table and the same collection of external functions
+// can then share a single function table instead of each building their own,
+// which matters because a graph walk creates a scope for each object it
+// evaluates.
+//
+// It's valid to call this on a nil results table, in which case it just
+// calls build.
+func (f *FunctionResults) SharedExternalFuncs(key any, build func() ExternalFuncs) ExternalFuncs {
+	if f == nil {
+		return build()
+	}
+	if shared, ok := f.externalFuncs.Load(key); ok {
+		return shared.(ExternalFuncs)
+	}
+	funcs := build()
+	funcs.sharedKey = key
+	shared, _ := f.externalFuncs.LoadOrStore(key, funcs)
+	return shared.(ExternalFuncs)
 }
 
 // NewFunctionResultsTable initializes a mapping of function calls to prior

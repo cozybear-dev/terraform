@@ -63,7 +63,32 @@ func (s *Scope) Functions() map[string]function.Function {
 		immutableResults = filesystemNoopWrapper
 	}
 
+	// Building the function table is relatively expensive, and during a
+	// graph walk there's a separate scope for each object being evaluated,
+	// so scopes that would produce exactly the same table share it. We can
+	// do that only when the table depends only on the settings captured in
+	// the key, which means that any external functions must be a collection
+	// that we can identify. The table must not be modified once it has been
+	// built.
+	var tableKey functionTableKey
+	shareTable := s.FunctionResults != nil && (s.ExternalFuncs.sharedKey != nil || !s.ExternalFuncs.hasFunctions())
+	if shareTable {
+		tableKey = functionTableKey{
+			externalFuncs: s.ExternalFuncs.sharedKey,
+			baseDir:       s.BaseDir,
+			forProvider:   s.ForProvider,
+			consoleMode:   s.ConsoleMode,
+			pureOnly:      s.PureOnly,
+			planTimestamp: s.PlanTimestamp,
+		}
+	}
+
 	s.funcsLock.Lock()
+	if s.funcs == nil && shareTable {
+		if table, ok := s.FunctionResults.tables.Load(tableKey); ok {
+			s.funcs = table.(map[string]function.Function)
+		}
+	}
 	if s.funcs == nil {
 		coreFuncs := baseFunctions(s.BaseDir)
 
@@ -86,11 +111,12 @@ func (s *Scope) Functions() map[string]function.Function {
 		// all of the other functions themselves, but we pass them indirectly
 		// via a callback to avoid chicken/egg problems while initializing
 		// the functions table.
+		var table map[string]function.Function
 		funcsFunc := func() (funcs map[string]function.Function, fsFuncs collections.Set[string], templateFuncs collections.Set[string]) {
 			// The templatefile and templatestring functions prevent recursive
 			// calls to themselves and each other by copying this map and
 			// overwriting the relevant entries.
-			return s.funcs, filesystemFunctions, templateFunctions
+			return table, filesystemFunctions, templateFunctions
 		}
 		coreFuncs["templatefile"] = funcs.MakeTemplateFileFunc(s.BaseDir, funcsFunc, immutableResults("templatefile", s.FunctionResults))
 		coreFuncs["templatestring"] = funcs.MakeTemplateStringFunc(funcsFunc)
@@ -117,11 +143,11 @@ func (s *Scope) Functions() map[string]function.Function {
 		// All of the built-in functions are also available under the "core::"
 		// namespace, to distinguish from the "provider::" and "module::"
 		// namespaces that can serve as external extension points.
-		s.funcs = make(map[string]function.Function)
+		table = make(map[string]function.Function)
 		for name, fn := range coreFuncs {
 			fn = funcs.WithDescription(name, fn)
-			s.funcs[name] = fn
-			s.funcs["core::"+name] = fn
+			table[name] = fn
+			table["core::"+name] = fn
 		}
 
 		// We'll also bring in any external functions that the caller provided
@@ -131,8 +157,20 @@ func (s *Scope) Functions() map[string]function.Function {
 		for providerLocalName, funcs := range s.ExternalFuncs.Provider {
 			for funcName, fn := range funcs {
 				name := fmt.Sprintf("provider::%s::%s", providerLocalName, funcName)
-				s.funcs[name] = fn
+				table[name] = fn
 			}
+		}
+
+		// table mustn't be assigned to again from here on. The template
+		// functions in it read that variable when they're called, and once
+		// the table is shared they can be called from other goroutines at
+		// any moment.
+		s.funcs = table
+		if shareTable {
+			// If another scope built the same table concurrently then
+			// we'll use that one, so that all scopes agree.
+			shared, _ := s.FunctionResults.tables.LoadOrStore(tableKey, table)
+			s.funcs = shared.(map[string]function.Function)
 		}
 	}
 	s.funcsLock.Unlock()
@@ -352,6 +390,21 @@ func (s *Scope) experimentalFunction(experiment experiments.Experiment, fn funct
 // to conform to the expected function return value conventions.
 type ExternalFuncs struct {
 	Provider map[string]map[string]function.Function
+
+	// sharedKey is set for a collection of external functions returned by
+	// [FunctionResults.SharedExternalFuncs], and identifies that collection
+	// among all of those associated with the same results table.
+	sharedKey any
+}
+
+// hasFunctions returns true if there is at least one external function.
+func (f ExternalFuncs) hasFunctions() bool {
+	for _, funcs := range f.Provider {
+		if len(funcs) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // immutableResults is a wrapper for cty function implementations which may
