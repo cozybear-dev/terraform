@@ -123,15 +123,18 @@ func findMoveStatements(cfg *configs.Config, into []MoveStatement) []MoveStateme
 // We should think very hard before adding any _new_ implication rules for
 // moved statements.
 func ImpliedMoveStatements(rootCfg *configs.Config, prevRunState *states.State, explicitStmts []MoveStatement) []MoveStatement {
-	return impliedMoveStatements(rootCfg, prevRunState, explicitStmts, nil)
+	// We look for the instances of every module in the configuration, so
+	// we index the modules in the state rather than looking through all of
+	// them for each one. Nothing modifies the state while we're doing this.
+	return impliedMoveStatements(rootCfg, prevRunState.IndexModuleInstances(), explicitStmts, nil)
 }
 
-func impliedMoveStatements(cfg *configs.Config, prevRunState *states.State, explicitStmts []MoveStatement, into []MoveStatement) []MoveStatement {
+func impliedMoveStatements(cfg *configs.Config, prevRunModules *states.ModuleInstancesIndex, explicitStmts []MoveStatement, into []MoveStatement) []MoveStatement {
 	modAddr := cfg.Path
 
 	// There can be potentially many instances of the module, so we need
 	// to consider each of them separately.
-	for _, modState := range prevRunState.ModuleInstances(modAddr) {
+	for _, modState := range prevRunModules.ModuleInstances(modAddr) {
 		// What we're looking for here is either a no-key resource instance
 		// where the configuration has count set or a zero-key resource
 		// instance where the configuration _doesn't_ have count set.
@@ -202,7 +205,7 @@ func impliedMoveStatements(cfg *configs.Config, prevRunState *states.State, expl
 	}
 
 	for _, childCfg := range cfg.Children {
-		into = impliedMoveStatements(childCfg, prevRunState, explicitStmts, into)
+		into = impliedMoveStatements(childCfg, prevRunModules, explicitStmts, into)
 	}
 
 	return into

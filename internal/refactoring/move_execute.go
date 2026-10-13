@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/dag"
 	"github.com/hashicorp/terraform/internal/logging"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -222,20 +223,30 @@ func buildMoveStatementGraph(stmts []MoveStatement) *dag.AcyclicGraph {
 	}
 
 	// Now we'll add the edges representing chaining and nesting relationships.
-	// We assume that a reasonable configuration will have at most tens of
-	// move statements and thus this N*M algorithm is acceptable.
-	for dependerI := range stmts {
+	//
+	// This compares every statement with every other one. A configuration
+	// with thousands of statements is quite possible when many modules each
+	// declare a few, so we do the comparisons for each statement on all of
+	// the processors, and then add the edges in the order that a single
+	// loop would have found them.
+	dependees := make([][]int32, len(stmts))
+	parallel.For(len(stmts), 8, func(dependerI int) {
 		depender := &stmts[dependerI]
+		var found []int32
 		for dependeeI := range stmts {
 			if dependerI == dependeeI {
 				// skip comparing the statement to itself
 				continue
 			}
-			dependee := &stmts[dependeeI]
-
-			if statementDependsOn(depender, dependee) {
-				g.Connect(depender, dependee)
+			if statementDependsOn(depender, &stmts[dependeeI]) {
+				found = append(found, int32(dependeeI))
 			}
+		}
+		dependees[dependerI] = found
+	})
+	for dependerI, found := range dependees {
+		for _, dependeeI := range found {
+			g.Connect(&stmts[dependerI], &stmts[dependeeI])
 		}
 	}
 

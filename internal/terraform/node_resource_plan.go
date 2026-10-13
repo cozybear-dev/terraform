@@ -506,11 +506,14 @@ func (n *nodeExpandPlannableResource) dynamicExpand(ctx EvalContext, knownModule
 		if ss == nil {
 			return // No previous state, so nothing to do here.
 		}
-		state := ss.Lock()
-		defer ss.Unlock()
+		// We only read the state here, so we take the lock that lets
+		// the other resources do this at the same time, and that doesn't
+		// mark the state as possibly changed.
+		ss.RLock()
+		defer ss.RUnlock()
 
 	Resources:
-		for _, res := range state.Resources(n.Addr) {
+		for _, res := range ss.ResourcesWhileRLocked(n.Addr) {
 
 			for _, knownModule := range knownModules {
 				if knownModule.Equal(res.Addr.Module) {
