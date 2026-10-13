@@ -5,6 +5,7 @@ package namedvals
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/zclconf/go-cty/cty"
 
@@ -20,10 +21,15 @@ import (
 // of different levels of "known-ness" and then when queried the result will
 // be the value from the most specific registration seen so far.
 //
-// Values is not concurrency-safe, because we expect to use it only indirectly
-// through the public-facing [State] type and it should be the one to ensure
-// concurrency safety.
+// Values is concurrency-safe. Each kind of named value has its own lock,
+// rather than [State] having one for all of them, because nearly every graph
+// node reads or writes named values and with a single lock a walk of a large
+// configuration spends much of its time queueing for it. For the same reason
+// the methods for exact results work out the unique key of the address, which
+// involves building a string, before they take the lock.
 type values[LocalType namedValueAddr, AbsType namedValueAddr] struct {
+	mu sync.RWMutex
+
 	// exact are values for objects in fully-qualified module instances.
 	exact addrs.Map[AbsType, cty.Value]
 
@@ -55,25 +61,35 @@ type namedValueAddr interface {
 	fmt.Stringer
 }
 
-func newValues[LocalType namedValueAddr, AbsType namedValueAddr]() values[LocalType, AbsType] {
-	return values[LocalType, AbsType]{
+func newValues[LocalType namedValueAddr, AbsType namedValueAddr]() *values[LocalType, AbsType] {
+	return &values[LocalType, AbsType]{
 		exact:       addrs.MakeMap[AbsType, cty.Value](),
 		placeholder: addrs.MakeMap[addrs.Module, addrs.Map[addrs.InPartialExpandedModule[LocalType], cty.Value]](),
 	}
 }
 
 func (v *values[LocalType, AbsType]) SetExactResult(addr AbsType, val cty.Value) {
-	if v.exact.Has(addr) {
+	key := addr.UniqueKey()
+	v.mu.Lock()
+	_, exists := v.exact.Elems[key]
+	if !exists {
+		v.exact.Elems[key] = addrs.MapElem[AbsType, cty.Value]{Key: addr, Value: val}
+	}
+	v.mu.Unlock()
+	if exists {
 		// This is always a bug in the caller, because Terraform Core should
 		// use its graph to ensure that each value gets set exactly once and
 		// the values get registered in the correct order.
 		panic(fmt.Sprintf("value for %s was already set by an earlier caller", addr))
 	}
-	v.exact.Put(addr, val)
 }
 
 func (v *values[LocalType, AbsType]) HasExactResult(addr AbsType) bool {
-	return v.exact.Has(addr)
+	key := addr.UniqueKey()
+	v.mu.RLock()
+	_, exists := v.exact.Elems[key]
+	v.mu.RUnlock()
+	return exists
 }
 
 func (v *values[LocalType, AbsType]) GetExactResult(addr AbsType) cty.Value {
@@ -81,20 +97,23 @@ func (v *values[LocalType, AbsType]) GetExactResult(addr AbsType) cty.Value {
 	// callers should not end up holding AbsType addresses if they are dealing
 	// with unexpanded objects because they wouldn't have instance keys to
 	// fill in to the address, so assuming not for now.
-	if !v.exact.Has(addr) {
+	key := addr.UniqueKey()
+	v.mu.RLock()
+	elem, exists := v.exact.Elems[key]
+	v.mu.RUnlock()
+	if !exists {
 		// This is always a bug in the caller, because Terraform Core should
 		// use its graph to ensure that each value gets set exactly once and
 		// the values get registered in the correct order.
 		panic(fmt.Sprintf("value for %s was requested before it was provided", addr))
 	}
-	return v.exact.Get(addr)
-}
-
-func (v *values[LocalType, AbsType]) GetExactResults() addrs.Map[AbsType, cty.Value] {
-	return v.exact
+	return elem.Value
 }
 
 func (v *values[LocalType, AbsType]) SetPlaceholderResult(addr addrs.InPartialExpandedModule[LocalType], val cty.Value) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	modAddr := addr.Module.Module()
 	if !v.placeholder.Has(modAddr) {
 		v.placeholder.Put(modAddr, addrs.MakeMap[addrs.InPartialExpandedModule[LocalType], cty.Value]())
@@ -110,6 +129,9 @@ func (v *values[LocalType, AbsType]) SetPlaceholderResult(addr addrs.InPartialEx
 }
 
 func (v *values[LocalType, AbsType]) GetPlaceholderResult(addr addrs.InPartialExpandedModule[LocalType]) cty.Value {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
 	modAddr := addr.Module.Module()
 	if !v.placeholder.Has(modAddr) {
 		return cty.DynamicVal
