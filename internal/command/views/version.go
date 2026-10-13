@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform/internal/command/arguments"
 	"github.com/hashicorp/terraform/internal/depsfile"
 	"github.com/hashicorp/terraform/internal/tfdiags"
+	tfversion "github.com/hashicorp/terraform/version"
 )
 
 type Version interface {
@@ -65,6 +66,11 @@ func (v *VersionHuman) LogVersion(version string, platform string, providerSelec
 	// Terraform version and platform
 	fmt.Fprintf(&outputString, "Terraform v%s\n", version) // May include prerelease if relevant
 	fmt.Fprintf(&outputString, "on %s\n", platform)
+	if tfversion.ForkBuild != "" {
+		// This isn't upstream's build, and anyone looking at the output
+		// to find out what ran should be able to tell.
+		fmt.Fprintf(&outputString, "fork: %s\n", tfversion.ForkBuild)
+	}
 
 	// For each provider selection, print the provider and version
 	// The list is sorted to make output deterministic.
