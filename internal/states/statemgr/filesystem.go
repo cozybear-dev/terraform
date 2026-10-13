@@ -61,6 +61,19 @@ type Filesystem struct {
 	readFile      *statefile.File
 	backupFile    *statefile.File
 	writtenBackup bool
+
+	// backupDeferred is set when createStateFiles has found an existing
+	// state file but has left loading the backup snapshot from it for
+	// later, because that's expensive for a large state. The next
+	// refreshState to read the file then provides the backup snapshot as a
+	// side effect, so that we don't need to parse the same file twice.
+	backupDeferred bool
+
+	// readDigest and backupDigest are the digests of the states in readFile
+	// and backupFile respectively, if we've had reason to calculate them.
+	// They must be reset whenever the corresponding file changes.
+	readDigest   *statefile.MarshalDigest
+	backupDigest *statefile.MarshalDigest
 }
 
 var (
@@ -103,6 +116,8 @@ func NewFilesystemBetweenPaths(readPath, writePath string) *Filesystem {
 func (s *Filesystem) SetBackupPath(path string) {
 	s.backupPath = path
 	s.backupFile = nil
+	s.backupDigest = nil
+	s.backupDeferred = false
 	s.writtenBackup = false
 }
 
@@ -148,10 +163,48 @@ func (s *Filesystem) writeState(state *states.State, meta *SnapshotMeta) error {
 	}
 	defer s.stateFileOut.Sync()
 
+	if s.backupDeferred {
+		// Nothing has read the existing snapshot since we opened the file,
+		// so we must load it now before we overwrite it.
+		s.backupDeferred = false
+		if _, err := s.stateFileOut.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		backupFile, err := statefile.Read(s.stateFileOut)
+		if err != nil && err != statefile.ErrNoState {
+			return err
+		}
+		s.backupFile = backupFile
+		s.backupDigest = nil
+	}
+
+	// We compare the new state with up to two other snapshots below, so
+	// we'll serialize it for comparison at most once.
+	var stateDigest *statefile.MarshalDigest
+	marshalEqual := func(other *states.State, otherDigest **statefile.MarshalDigest) bool {
+		if state == nil || other == nil {
+			return false
+		}
+		if statefile.StatesDefinitelyDiffer(state, other) {
+			// We can usually tell that the state has changed without
+			// needing to serialize it.
+			return false
+		}
+		if stateDigest == nil {
+			digest := statefile.StateMarshalDigest(state)
+			stateDigest = &digest
+		}
+		if *otherDigest == nil {
+			digest := statefile.StateMarshalDigest(other)
+			*otherDigest = &digest
+		}
+		return *stateDigest == **otherDigest
+	}
+
 	// We'll try to write our backup first, so we can be sure we've created
 	// it successfully before clobbering the original file it came from.
 	if !s.writtenBackup && s.backupFile != nil && s.backupPath != "" {
-		if !statefile.StatesMarshalEqual(state, s.backupFile.State) {
+		if !marshalEqual(s.backupFile.State, &s.backupDigest) {
 			log.Printf("[TRACE] statemgr.Filesystem: creating backup snapshot at %s", s.backupPath)
 			bfh, err := os.Create(s.backupPath)
 			if err != nil {
@@ -168,6 +221,11 @@ func (s *Filesystem) writeState(state *states.State, meta *SnapshotMeta) error {
 		} else {
 			log.Print("[TRACE] statemgr.Filesystem: not making a backup, because the new snapshot is identical to the old")
 		}
+		if s.backupFile == s.readFile && s.readDigest == nil {
+			// The two snapshots are the same object, so they have the
+			// same digest.
+			s.readDigest = s.backupDigest
+		}
 	} else {
 		// This branch is all just logging, to help understand why we didn't make a backup.
 		switch {
@@ -182,27 +240,31 @@ func (s *Filesystem) writeState(state *states.State, meta *SnapshotMeta) error {
 		}
 	}
 
-	s.file = s.file.DeepCopy()
 	if s.file == nil {
 		s.file = NewStateFile()
+	} else {
+		// We're about to replace the state, so we only need to preserve
+		// the metadata from the previous snapshot.
+		s.file = &statefile.File{
+			TerraformVersion: s.file.TerraformVersion,
+			Serial:           s.file.Serial,
+			Lineage:          s.file.Lineage,
+		}
 	}
 	s.file.State = state.DeepCopy()
 
 	if _, err := s.stateFileOut.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := s.stateFileOut.Truncate(0); err != nil {
-		return err
-	}
 
 	if state == nil {
 		// if we have no state, don't write anything else.
 		log.Print("[TRACE] statemgr.Filesystem: state is nil, so leaving the file empty")
-		return nil
+		return s.stateFileOut.Truncate(0)
 	}
 
 	if meta == nil {
-		if s.readFile == nil || !statefile.StatesMarshalEqual(s.file.State, s.readFile.State) {
+		if s.readFile == nil || !marshalEqual(s.readFile.State, &s.readDigest) {
 			s.file.Serial++
 			log.Printf("[TRACE] statemgr.Filesystem: state has changed since last snapshot, so incrementing serial to %d", s.file.Serial)
 		} else {
@@ -216,13 +278,52 @@ func (s *Filesystem) writeState(state *states.State, meta *SnapshotMeta) error {
 	}
 
 	log.Printf("[TRACE] statemgr.Filesystem: writing snapshot at %s", s.path)
-	if err := statefile.Write(s.file, s.stateFileOut); err != nil {
+	out := &emptyingWriter{f: s.stateFileOut}
+	if err := writeStateFile(s.file, out); err != nil {
 		return err
+	}
+	if !out.emptied {
+		// Nothing was written at all, which leaves the file empty.
+		if err := s.stateFileOut.Truncate(0); err != nil {
+			return err
+		}
 	}
 
 	// Any future reads must come from the file we've now updated
 	s.readPath = s.path
 	return nil
+}
+
+// writeStateFile is statefile.Write. It's a variable only so that tests can
+// examine the file while a snapshot is being written to it.
+var writeStateFile = statefile.Write
+
+// emptyingWriter writes to the given file, whose offset must be zero, after
+// first discarding whatever the file already contains.
+//
+// The file must be emptied rather than having a new snapshot written over
+// the previous one, so that if we're interrupted part way through then
+// what's left is recognizably incomplete. A partly written snapshot followed
+// by the rest of the previous one would very often still be valid syntax,
+// and so could be read back as a state that never existed.
+//
+// We leave emptying the file until the first write, though, because
+// preparing a large snapshot takes a while before there is anything to
+// write, and an empty file is read as there being no state at all rather
+// than as an error. Until then the file still holds the previous snapshot.
+type emptyingWriter struct {
+	f       *os.File
+	emptied bool
+}
+
+func (w *emptyingWriter) Write(p []byte) (int, error) {
+	if !w.emptied {
+		if err := w.f.Truncate(0); err != nil {
+			return 0, err
+		}
+		w.emptied = true
+	}
+	return w.f.Write(p)
 }
 
 // PersistState is an implementation of Persister that does nothing because
@@ -253,6 +354,7 @@ func (s *Filesystem) GetRootOutputValues(ctx context.Context) (map[string]*state
 
 func (s *Filesystem) refreshState() error {
 	var reader io.Reader
+	readFromOutputFile := false
 
 	// The s.readPath file is only OK to read if we have not written any state out
 	// (in which case the same state needs to be read in), and no state output file
@@ -289,6 +391,7 @@ func (s *Filesystem) refreshState() error {
 		// we have a state file, make sure we're at the start
 		s.stateFileOut.Seek(0, io.SeekStart)
 		reader = s.stateFileOut
+		readFromOutputFile = true
 	}
 
 	f, err := statefile.Read(reader)
@@ -302,6 +405,14 @@ func (s *Filesystem) refreshState() error {
 
 	s.file = f
 	s.readFile = s.file.DeepCopy()
+	s.readDigest = nil
+	if s.backupDeferred && readFromOutputFile {
+		// What we've just read is what a subsequent write would replace,
+		// so it's also our backup snapshot. Both are only ever read.
+		s.backupDeferred = false
+		s.backupFile = s.readFile
+		s.backupDigest = nil
+	}
 	if s.file != nil {
 		log.Printf("[TRACE] statemgr.Filesystem: read snapshot with lineage %q serial %d", s.file.Lineage, s.file.Serial)
 	} else {
@@ -470,6 +581,15 @@ func (s *Filesystem) createStateFiles() error {
 
 	// If the file already existed with content then that'll be the content
 	// of our backup file if we write a change later.
+	s.backupDigest = nil
+	if s.readFile == nil && s.readPath == s.path {
+		// We've not read the state yet, and when we do it'll be from this
+		// same file, so we'll take the backup snapshot from that read
+		// rather than parsing the whole file twice.
+		s.backupFile = nil
+		s.backupDeferred = true
+		return nil
+	}
 	s.backupFile, err = statefile.Read(s.stateFileOut)
 	if err != nil {
 		if err != statefile.ErrNoState {
