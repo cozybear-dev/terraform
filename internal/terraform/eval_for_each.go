@@ -5,6 +5,8 @@ package terraform
 
 import (
 	"fmt"
+	"reflect"
+	"sync"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
@@ -19,8 +21,61 @@ import (
 // evaluateForEachExpression differs from evaluateForEachExpressionValue by
 // returning an error if the count value is not known, and converting the
 // cty.Value to a map[string]cty.Value for compatibility with other calls.
+//
+// Each instance of a resource asks for the for_each value of the whole
+// resource, typically several times, so evaluating the expression every time
+// would make the total cost grow with the square of the number of
+// instances. Everything that the expression refers to is complete before
+// anything belonging to the resource is visited, so within a single graph
+// walk the result for a particular module instance can't change, and we
+// remember it. The returned map is shared and must not be modified.
 func evaluateForEachExpression(expr hcl.Expression, ctx EvalContext, allowUnknown bool) (forEach map[string]cty.Value, known bool, diags tfdiags.Diagnostics) {
-	return newForEachEvaluator(expr, ctx, allowUnknown).ResourceValue()
+	cache, key, cacheable := forEachCacheFor(expr, ctx, allowUnknown)
+	if cacheable {
+		if cached, ok := cache.Load(key); ok {
+			return cached.(map[string]cty.Value), true, nil
+		}
+	}
+
+	forEach, known, diags = newForEachEvaluator(expr, ctx, allowUnknown).ResourceValue()
+	if cacheable && known && len(diags) == 0 {
+		cache.Store(key, forEach)
+	}
+	return forEach, known, diags
+}
+
+// forEachValueCache remembers the results of evaluating for_each expressions
+// during one graph walk, as a map from forEachCacheKey to
+// map[string]cty.Value. See evaluateForEachExpression.
+type forEachValueCache struct {
+	sync.Map
+}
+
+// forEachCacheKey identifies a for_each expression evaluated in a particular
+// module instance.
+type forEachCacheKey struct {
+	expr         hcl.Expression
+	module       string
+	allowUnknown bool
+}
+
+// forEachCacheFor returns the cache of for_each values for the graph walk
+// that the given context belongs to, along with the key for the given
+// expression, or returns false if the result can't be cached.
+func forEachCacheFor(expr hcl.Expression, ctx EvalContext, allowUnknown bool) (*forEachValueCache, forEachCacheKey, bool) {
+	builtinCtx, ok := ctx.(*BuiltinEvalContext)
+	if !ok || builtinCtx.Evaluator == nil || expr == nil {
+		return nil, forEachCacheKey{}, false
+	}
+	scope, ok := builtinCtx.scope.(evalContextModuleInstance)
+	if !ok {
+		return nil, forEachCacheKey{}, false
+	}
+	// The expression is part of the key, so its type must be usable as one.
+	if reflect.ValueOf(expr).Kind() != reflect.Pointer {
+		return nil, forEachCacheKey{}, false
+	}
+	return &builtinCtx.Evaluator.forEachValues, forEachCacheKey{expr, scope.Addr.String(), allowUnknown}, true
 }
 
 // forEachEvaluator is the standard mechanism for interpreting an expression

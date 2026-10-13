@@ -83,6 +83,10 @@ type Evaluator struct {
 	FunctionResults *lang.FunctionResults
 
 	PlanTimestamp time.Time
+
+	// forEachValues remembers the results of evaluating for_each
+	// expressions. See evaluateForEachExpression.
+	forEachValues forEachValueCache
 }
 
 // Scope creates an evaluation scope for the given module path and optional
