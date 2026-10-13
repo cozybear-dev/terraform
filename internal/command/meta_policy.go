@@ -78,6 +78,13 @@ type policyModuleInstallHook struct {
 	view       views.Init
 }
 
+// RestrictsModuleSources tells the module installer whether this hook might
+// refuse a module source, in which case no module may be fetched before the
+// hook has been asked about it.
+func (h *policyModuleInstallHook) RestrictsModuleSources() bool {
+	return h.client != nil
+}
+
 // ModuleSourceResolved implements [initwd.ModuleInstallHook] and is called after a module source is resolved, and enables policy evaluation for the module before
 // it is installed.
 func (h *policyModuleInstallHook) ModuleSourceResolved(ctx context.Context, req *configs.ModuleRequest, version string) tfdiags.Diagnostics {

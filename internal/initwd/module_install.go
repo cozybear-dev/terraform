@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/zclconf/go-cty/cty"
 	"log"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/apparentlymart/go-versions/versions"
@@ -142,6 +144,17 @@ func (i *ModuleInstaller) InstallModules(ctx context.Context, rootDir, testsDir 
 	}
 	walker := i.moduleInstallWalker(ctx, manifest, upgrade, fetcher, hooks...)
 
+	// The calls in each module are known as soon as that module is loaded,
+	// so we start fetching the packages they'll need at that point rather
+	// than fetching each one only when the walk reaches it.
+	stagingDir := filepath.Join(i.modsDir, modulePrefetchDir)
+	os.RemoveAll(stagingDir) // in case an earlier run was interrupted
+	defer func() {
+		fetcher.Close()
+		os.RemoveAll(stagingDir)
+	}()
+	walker = prefetchingModuleWalker(ctx, walker, manifest, upgrade, fetcher, stagingDir, hooks)
+
 	cfg, instDiags := i.initializer(rootMod, walker)
 	diags = diags.Append(instDiags)
 	if diags.HasErrors() {
@@ -158,6 +171,87 @@ func (i *ModuleInstaller) InstallModules(ctx context.Context, rootDir, testsDir 
 	}
 
 	return cfg, diags
+}
+
+// modulePrefetchDir is the name of the directory, inside the modules
+// directory, that packages are fetched into ahead of being installed. It
+// exists only while modules are being installed.
+const modulePrefetchDir = ".prefetch"
+
+// moduleSourceRestrictor is implemented by an install hook that might refuse
+// a module source when it's told that the source has been resolved.
+type moduleSourceRestrictor interface {
+	RestrictsModuleSources() bool
+}
+
+// prefetchingModuleWalker wraps the given walker so that, the first time it's
+// asked for a child of some module, the remote packages needed by all of
+// that module's calls start being fetched in the background. The walk
+// itself, and everything it reports, is unchanged: each module is still
+// installed in turn, and finds its package either already fetched or on its
+// way.
+//
+// Nothing is fetched ahead if a hook might refuse a module source, because
+// then a package must not be fetched before the hook has agreed to it.
+func prefetchingModuleWalker(ctx context.Context, walker configs.ModuleWalker, manifest modsdir.Manifest, upgrade bool, fetcher *getmodules.PackageFetcher, stagingDir string, hooks []ModuleInstallHook) configs.ModuleWalker {
+	for _, hook := range hooks {
+		if r, ok := hook.(moduleSourceRestrictor); ok && r.RestrictsModuleSources() {
+			return walker
+		}
+	}
+
+	seen := make(map[*configs.Module]bool)
+	return configs.ModuleWalkerFunc(
+		func(req *configs.ModuleRequest) (*configs.Module, *version.Version, hcl.Diagnostics) {
+			if parent := req.Parent; parent != nil && parent.Module != nil && !seen[parent.Module] {
+				seen[parent.Module] = true
+				var packageAddrs []string
+				for _, call := range parent.Module.ModuleCalls {
+					packageAddr, sourceAddr, ok := literalRemotePackage(call)
+					if !ok {
+						continue
+					}
+					// Only for the calls that the walk is going to install,
+					// which it decides in the same way.
+					key := manifest.ModuleKey(append(slices.Clone(req.Path[:len(req.Path)-1]), call.Name))
+					if record, recorded := manifest[key]; !upgrade && recorded && record.SourceAddr == sourceAddr {
+						continue
+					}
+					packageAddrs = append(packageAddrs, packageAddr)
+				}
+				// The order doesn't matter to the result, but there's no
+				// reason for it to vary.
+				slices.Sort(packageAddrs)
+				fetcher.Prefetch(ctx, stagingDir, packageAddrs)
+			}
+			return walker.LoadModule(req)
+		},
+	)
+}
+
+// literalRemotePackage returns the address of the remote package that the
+// given module call will be installed from, if that can be known just from
+// the call itself: its source must be a literal string, rather than an
+// expression that needs evaluating, and must be a remote source address,
+// which also means it has no version constraint. It also returns the whole
+// source address in the form that's recorded in the manifest.
+func literalRemotePackage(call *configs.ModuleCall) (packageAddr, sourceAddr string, ok bool) {
+	if call.SourceExpr == nil || call.VersionExpr != nil || !hclsyntax.ValidIdentifier(call.Name) {
+		return "", "", false
+	}
+	val, diags := call.SourceExpr.Value(nil)
+	if diags.HasErrors() || val.IsNull() || !val.IsWhollyKnown() || val.IsMarked() || val.Type() != cty.String {
+		return "", "", false
+	}
+	addr, err := moduleaddrs.ParseModuleSource(val.AsString())
+	if err != nil {
+		return "", "", false
+	}
+	remote, ok := addr.(addrs.ModuleSourceRemote)
+	if !ok {
+		return "", "", false
+	}
+	return remote.Package.String(), remote.String(), true
 }
 
 func (i *ModuleInstaller) moduleInstallWalker(ctx context.Context, manifest modsdir.Manifest, upgrade bool, fetcher *getmodules.PackageFetcher, hooks ...ModuleInstallHook) configs.ModuleWalker {

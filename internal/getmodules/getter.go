@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
 	getter "github.com/hashicorp/go-getter"
@@ -67,7 +68,7 @@ var goGetterGetters = map[string]getter.Getter{
 	"https": getterHTTPGetter,
 
 	// Cloud storage getters
-	"gcs": new(getter.GCSGetter),
+	"gcs": new(gcsGetter),
 	"s3":  new(getter.S3Getter),
 
 	// Version control getters
@@ -76,6 +77,22 @@ var goGetterGetters = map[string]getter.Getter{
 
 	// Local and file-based getters
 	"file": new(getter.FileGetter),
+}
+
+// prefetchGetters returns the getters to use for one fetch that might run
+// at the same time as others. A getter is told which client is using it
+// each time it's used, so two fetches mustn't share one. Only the getters
+// for the kinds of package that can be prefetched are included.
+func prefetchGetters() map[string]getter.Getter {
+	return map[string]getter.Getter{
+		"gcs": new(gcsGetter),
+	}
+}
+
+// canPrefetch returns true if the package at the given normalized address
+// is of a kind that can safely be fetched at the same time as others.
+func canPrefetch(packageAddr string) bool {
+	return strings.HasPrefix(packageAddr, "gcs::")
 }
 
 var getterHTTPClient = cleanhttp.DefaultClient()
@@ -134,19 +151,7 @@ func (g reusingGetter) getWithGoGetter(ctx context.Context, instPath, packageAdd
 		}
 	} else {
 		log.Printf("[TRACE] getmodules: fetching %q to %q", packageAddr, instPath)
-		client := getter.Client{
-			Src: packageAddr,
-			Dst: instPath,
-			Pwd: instPath,
-
-			Mode: getter.ClientModeDir,
-
-			Detectors:     goGetterNoDetectors, // our caller should've already done detection
-			Decompressors: goGetterDecompressors,
-			Getters:       goGetterGetters,
-			Ctx:           ctx,
-		}
-		err = client.Get()
+		err = fetchWithGoGetter(ctx, instPath, packageAddr, goGetterGetters)
 		if err != nil {
 			return err
 		}
@@ -159,4 +164,22 @@ func (g reusingGetter) getWithGoGetter(ctx context.Context, instPath, packageAdd
 	// copied a previous tree we downloaded, and so either way we should
 	// have got the full module package structure written into instPath.
 	return nil
+}
+
+// fetchWithGoGetter fetches the package at the given normalized address
+// into the given directory using the given getters.
+func fetchWithGoGetter(ctx context.Context, instPath, packageAddr string, getters map[string]getter.Getter) error {
+	client := getter.Client{
+		Src: packageAddr,
+		Dst: instPath,
+		Pwd: instPath,
+
+		Mode: getter.ClientModeDir,
+
+		Detectors:     goGetterNoDetectors, // our caller should've already done detection
+		Decompressors: goGetterDecompressors,
+		Getters:       getters,
+		Ctx:           ctx,
+	}
+	return client.Get()
 }
