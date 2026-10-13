@@ -31,11 +31,18 @@ type graphTransformerMulti struct {
 }
 
 func (t *graphTransformerMulti) Transform(g *Graph) error {
+	// Rendering the graph after each step is expensive when the graph is
+	// large, so we do it only if something will receive the result.
+	logEnabled := logging.IsEnabled()
+
 	var lastStepStr string
 	for _, t := range t.Transforms {
 		log.Printf("[TRACE] (graphTransformerMulti) Executing graph transform %T", t)
 		if err := t.Transform(g); err != nil {
 			return err
+		}
+		if !logEnabled {
+			continue
 		}
 		if thisStepStr := g.StringWithNodeTypes(); thisStepStr != lastStepStr {
 			log.Printf("[TRACE] (graphTransformerMulti) Completed graph transform %T with new graph:\n%s  ------", t, logging.Indent(thisStepStr))

@@ -68,8 +68,10 @@ func (b *BasicGraphBuilder) Build(path addrs.ModuleInstance) (*Graph, tfdiags.Di
 		}
 	}
 
-	if !logging.GraphTrace {
-		// print the graph at least once for normal trace logs
+	if !logging.GraphTrace && logging.IsEnabled() {
+		// print the graph at least once for normal trace logs. Rendering
+		// the graph is expensive when it's large, so we do it only if
+		// something will receive the result.
 		log.Printf("[TRACE] Completed graph transform:\n%s  ------", g.StringWithNodeTypes())
 	}
 

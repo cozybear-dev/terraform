@@ -4,8 +4,10 @@
 package terraform
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
+	"math/bits"
 	"sort"
 
 	"github.com/hashicorp/hcl/v2"
@@ -14,6 +16,8 @@ import (
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/dag"
 	"github.com/hashicorp/terraform/internal/lang/langrefs"
+	"github.com/hashicorp/terraform/internal/logging"
+	"github.com/hashicorp/terraform/internal/parallel"
 )
 
 // GraphNodeReferenceable must be implemented by any node that represents
@@ -124,8 +128,46 @@ func (t *ReferenceTransformer) Transform(g *Graph) error {
 	// Build a reference map so we can efficiently look up the references
 	m := NewReferenceMap(g)
 
+	// Building the debug messages below is expensive for a large graph,
+	// so we only do it if something will actually receive them.
+	logEnabled := logging.IsEnabled()
+
 	// Find the things that reference things and connect them
+	if !logEnabled {
+		// Working out what each node refers to is independent of all of the
+		// other nodes and doesn't modify the graph, and it's a significant
+		// amount of work for a graph with many resource instances, so we do
+		// that part for all of the nodes concurrently and then add the
+		// edges afterwards.
+		var vertices []dag.Vertex
+		for v := range g.VerticesSeq() {
+			if _, ok := v.(GraphNodeConfigAction); ok {
+				// Dealt with below, as described in the other
+				// implementation of this loop.
+				continue
+			}
+			vertices = append(vertices, v)
+		}
+		targets := make([][]dag.Vertex, len(vertices))
+		parallel.For(len(vertices), 64, func(i int) {
+			v := vertices[i]
+			referencedNodes := m.References(v)
+			keep := referencedNodes[:0]
+			for _, referenced := range referencedNodes {
+				if !graphNodesAreResourceInstancesInDifferentInstancesOfSameModule(v, referenced) {
+					keep = append(keep, referenced)
+				}
+			}
+			targets[i] = keep
+		})
+		g.ConnectAll(vertices, targets)
+	}
 	for v := range g.VerticesSeq() {
+		if !logEnabled {
+			// Already dealt with above. This sequential form of the same
+			// work is only for when we need to describe it in the logs.
+			break
+		}
 		if _, ok := v.(GraphNodeConfigAction); ok {
 			// Because actions were allowed to reference the calling resource in
 			// configuration, we need to deal with the resulting cycles. Skip
@@ -135,17 +177,21 @@ func (t *ReferenceTransformer) Transform(g *Graph) error {
 		}
 
 		referencedNodes := m.References(v)
-		refDbg := make([]string, len(referencedNodes))
-		for i, v := range referencedNodes {
-			refDbg[i] = v.Name()
+		if logEnabled {
+			refDbg := make([]string, len(referencedNodes))
+			for i, v := range referencedNodes {
+				refDbg[i] = v.Name()
+			}
+			log.Printf(
+				"[DEBUG] ReferenceTransformer: %q references: %v",
+				v.Name(), refDbg)
 		}
-		log.Printf(
-			"[DEBUG] ReferenceTransformer: %q references: %v",
-			v.Name(), refDbg)
 
 		for _, referenced := range referencedNodes {
 			if !graphNodesAreResourceInstancesInDifferentInstancesOfSameModule(v, referenced) {
-				log.Printf("[DEBUG] ReferenceTransformer: %q references: %v", v.Name(), referenced.Name())
+				if logEnabled {
+					log.Printf("[DEBUG] ReferenceTransformer: %q references: %v", v.Name(), referenced.Name())
+				}
 				g.Connect(v, referenced)
 			}
 		}
@@ -217,7 +263,10 @@ func (t attachDataResourceDependsOnTransformer) Transform(g *Graph) error {
 	// First we need to make a map of referenceable addresses to their vertices.
 	// This is very similar to what's done in ReferenceTransformer, but we keep
 	// implementation separate as they may need to change independently.
-	refMap := NewReferenceMap(g)
+	//
+	// The map covers every node in the graph, so we don't build it until
+	// we find that there is a data resource to use it for.
+	var refMap ReferenceMap
 
 	for v := range g.VerticesSeq() {
 		depender, ok := v.(graphNodeAttachDataResourceDependsOn)
@@ -229,6 +278,10 @@ func (t attachDataResourceDependsOnTransformer) Transform(g *Graph) error {
 		// are eligible to be read during plan.
 		if depender.ResourceAddr().Resource.Mode != addrs.DataResourceMode {
 			continue
+		}
+
+		if refMap == nil {
+			refMap = NewReferenceMap(g)
 		}
 
 		// depMap will only add resource references then dedupe
@@ -258,6 +311,12 @@ type AttachDependenciesTransformer struct {
 }
 
 func (t AttachDependenciesTransformer) Transform(g *Graph) error {
+	if t.transformAll(g) {
+		return nil
+	}
+
+	// The graph is not a valid DAG, which will be reported when the graph
+	// is validated, so in the meantime we'll deal with each node separately.
 	for v := range g.VerticesSeq() {
 		attacher, ok := v.(GraphNodeAttachDependencies)
 		if !ok {
@@ -291,15 +350,8 @@ func (t AttachDependenciesTransformer) Transform(g *Graph) error {
 		// insert the address directly into depMap and forget about the returned
 		// set.
 		for d := range g.Ancestors(v).All() {
-			var addr addrs.ConfigResource
-
-			switch d := d.(type) {
-			case GraphNodeResourceInstance:
-				instAddr := d.ResourceInstanceAddr()
-				addr = instAddr.ContainingResource().Config()
-			case GraphNodeConfigResource:
-				addr = d.ResourceAddr()
-			default:
+			addr, ok := dependencyResourceAddr(d)
+			if !ok {
 				continue
 			}
 
@@ -323,6 +375,127 @@ func (t AttachDependenciesTransformer) Transform(g *Graph) error {
 	}
 
 	return nil
+}
+
+// dependencyResourceAddr returns the address of the resource that the given
+// graph node represents, or represents an instance of, if any.
+func dependencyResourceAddr(v dag.Vertex) (addrs.ConfigResource, bool) {
+	switch v := v.(type) {
+	case GraphNodeResourceInstance:
+		instAddr := v.ResourceInstanceAddr()
+		return instAddr.ContainingResource().Config(), true
+	case GraphNodeConfigResource:
+		return v.ResourceAddr(), true
+	default:
+		return addrs.ConfigResource{}, false
+	}
+}
+
+// transformAll is the main implementation of Transform, which finds the
+// dependencies of all nodes in a single pass over the graph rather than
+// walking the graph separately for each node, since the latter becomes
+// very expensive in a graph with many resource instances.
+//
+// It returns false if the graph isn't a valid DAG, in which case it has not
+// attached any dependencies at all.
+func (t AttachDependenciesTransformer) transformAll(g *Graph) bool {
+	// Each distinct resource address gets a label, numbered in the order
+	// we want the addresses to appear in the results.
+	type resource struct {
+		key  string
+		addr addrs.ConfigResource
+	}
+	nodeKeys := make(map[dag.Vertex]string)
+	resources := make(map[string]resource)
+	// Many nodes can share the same address, such as all of the instances
+	// of a resource, so we avoid building the string form of an address
+	// we've just seen.
+	var lastAddr addrs.ConfigResource
+	var lastKey string
+	for v := range g.VerticesSeq() {
+		addr, ok := dependencyResourceAddr(v)
+		if !ok {
+			continue
+		}
+		if lastKey == "" || !addr.Equal(lastAddr) {
+			lastAddr, lastKey = addr, addr.String()
+		}
+		nodeKeys[v] = lastKey
+		if _, exists := resources[lastKey]; !exists {
+			resources[lastKey] = resource{lastKey, addr}
+		}
+	}
+	sorted := make([]resource, 0, len(resources))
+	for _, r := range resources {
+		sorted = append(sorted, r)
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].key < sorted[j].key
+	})
+	labels := make(map[string]int, len(sorted))
+	for i, r := range sorted {
+		labels[r.key] = i
+	}
+
+	label := func(v dag.Vertex) int {
+		if key, ok := nodeKeys[v]; ok {
+			return labels[key]
+		}
+		return -1
+	}
+	want := func(v dag.Vertex) bool {
+		_, ok := v.(GraphNodeAttachDependencies)
+		return ok
+	}
+
+	logEnabled := logging.IsEnabled()
+
+	// Nodes very often have exactly the same dependencies as other nodes,
+	// in which case they share a single slice.
+	shared := make(map[string][]addrs.ConfigResource)
+	var keyBuf []byte
+
+	var set dag.LabelSet
+
+	return g.AncestorLabelSets(len(sorted), label, want, func(v dag.Vertex, ancestors dag.LabelSet) {
+		attacher := v.(GraphNodeAttachDependencies)
+		set = append(set[:0], ancestors...)
+
+		// If the node is a config resource then we make sure it is not
+		// referencing itself.
+		if self, ok := v.(GraphNodeConfigResource); ok {
+			if l, ok := labels[nodeKeys[v]]; ok && sorted[l].addr.Equal(self.ResourceAddr()) {
+				set.Remove(l)
+			} else if l, ok := labels[self.ResourceAddr().String()]; ok {
+				set.Remove(l)
+			}
+		}
+
+		keyBuf = keyBuf[:0]
+		for _, word := range set {
+			keyBuf = binary.LittleEndian.AppendUint64(keyBuf, word)
+		}
+		deps, ok := shared[string(keyBuf)]
+		if !ok {
+			count := 0
+			for _, word := range set {
+				count += bits.OnesCount64(word)
+			}
+			deps = make([]addrs.ConfigResource, 0, count)
+			for w, word := range set {
+				for word != 0 {
+					deps = append(deps, sorted[w*64+bits.TrailingZeros64(word)].addr)
+					word &= word - 1
+				}
+			}
+			shared[string(keyBuf)] = deps
+		}
+
+		if logEnabled {
+			log.Printf("[TRACE] AttachDependenciesTransformer: %s depends on %s", v.Name(), deps)
+		}
+		attacher.AttachDependencies(deps)
+	})
 }
 
 func isDependableResource(v dag.Vertex) bool {

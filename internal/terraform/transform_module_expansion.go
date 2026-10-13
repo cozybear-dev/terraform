@@ -6,7 +6,6 @@ package terraform
 import (
 	"log"
 
-	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/dag"
 )
@@ -27,10 +26,29 @@ type ModuleExpansionTransformer struct {
 	Concrete ConcreteModuleNodeFunc
 
 	closers map[string]*nodeCloseModule
+
+	// byPath has the vertices that were in the graph before we added any,
+	// other than those we never connect, grouped by the string
+	// representation of the module they belong to. Finding the vertices of
+	// each module by examining every vertex in the graph takes time in
+	// proportion to the number of modules multiplied by the size of the
+	// graph.
+	byPath map[string][]dag.Vertex
 }
 
 func (t *ModuleExpansionTransformer) Transform(g *Graph) error {
 	t.closers = make(map[string]*nodeCloseModule)
+	t.byPath = make(map[string][]dag.Vertex)
+	for v := range g.VerticesSeq() {
+		switch v := v.(type) {
+		case GraphNodeDestroyer:
+			// skip destroyers, as they can only depend on other resources.
+			continue
+		case GraphNodeModulePath:
+			key := v.ModulePath().String()
+			t.byPath[key] = append(t.byPath[key], v)
+		}
+	}
 	// The root module is always a singleton and so does not need expansion
 	// processing, but any descendant modules do. We'll process them
 	// recursively using t.transform.
@@ -72,9 +90,9 @@ func (t *ModuleExpansionTransformer) Transform(g *Graph) error {
 
 	// Modules implicitly depend on their child modules, so connect closers to
 	// other which contain their path.
-	for _, c := range t.closers {
-		for _, d := range t.closers {
-			if len(d.Addr) > len(c.Addr) && c.Addr.Equal(d.Addr[:len(c.Addr)]) {
+	for _, d := range t.closers {
+		for prefix := 1; prefix < len(d.Addr); prefix++ {
+			if c, ok := t.closers[d.Addr[:prefix].String()]; ok {
 				g.Connect(c, d)
 			}
 		}
@@ -115,28 +133,17 @@ func (t *ModuleExpansionTransformer) transform(g *Graph, c *configs.Config, pare
 	g.Connect(closer, expander)
 	t.closers[c.Path.String()] = closer
 
-	for childV := range g.VerticesSeq() {
+	// Everything that we add to the graph ourselves belongs to a different
+	// module, apart from this module's own expander and closer, which are
+	// already connected, so the vertices that were there to start with are
+	// all of the ones to connect.
+	for _, childV := range t.byPath[c.Path.String()] {
 		// don't connect a node to itself
 		if childV == expander {
 			continue
 		}
-
-		var path addrs.Module
-		switch t := childV.(type) {
-		case GraphNodeDestroyer:
-			// skip destroyers, as they can only depend on other resources.
-			continue
-
-		case GraphNodeModulePath:
-			path = t.ModulePath()
-		default:
-			continue
-		}
-
-		if path.Equal(c.Path) {
-			log.Printf("[TRACE] ModuleExpansionTransformer: %s must wait for expansion of %s", childV.Name(), c.Path)
-			g.Connect(childV, expander)
-		}
+		log.Printf("[TRACE] ModuleExpansionTransformer: %s must wait for expansion of %s", childV.Name(), c.Path)
+		g.Connect(childV, expander)
 	}
 
 	// Also visit child modules, recursively.

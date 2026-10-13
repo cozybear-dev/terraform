@@ -6,6 +6,7 @@ package terraform
 import (
 	"log"
 
+	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/states"
 )
 
@@ -63,7 +64,18 @@ func (t *AttachStateTransformer) Transform(g *Graph) error {
 
 		// make sure to attach a copy of the state, so instances can modify the
 		// same ResourceState.
-		an.AttachResourceState(rs.DeepCopy())
+		//
+		// A node only needs the state of its own instance along with the
+		// resource-level metadata. Copying all of the other instances of
+		// the resource for every node would make the total cost grow with
+		// the square of the number of instances.
+		an.AttachResourceState(&states.Resource{
+			Addr:           rs.Addr,
+			ProviderConfig: rs.ProviderConfig,
+			Instances: map[addrs.InstanceKey]*states.ResourceInstance{
+				addr.Resource.Key: is.DeepCopy(),
+			},
+		})
 	}
 
 	return nil

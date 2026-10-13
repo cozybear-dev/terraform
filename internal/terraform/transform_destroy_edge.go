@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/dag"
+	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/internal/plans"
 )
 
@@ -137,18 +138,33 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 	// resources and have no index or module instance information, but we will
 	// want to connect all the individual instances for correct ordering.
 	destroyersByResource := addrs.MakeMap[addrs.ConfigResource, []GraphNodeDestroyer]()
+
+	// The messages below mention the names of the nodes involved, which are
+	// expensive to produce for a large graph, so we skip them altogether
+	// when nothing would receive them.
+	logEnabled := logging.IsEnabled()
+
+	// We need the planned change for every creator below.
+	var changeFor func(addrs.AbsResourceInstance) *plans.ResourceInstanceChangeSrc
+	if t.Changes != nil {
+		changeFor = t.Changes.ResourceInstanceLookup()
+	}
 	for v := range g.VerticesSeq() {
 		switch n := v.(type) {
 		case GraphNodeDestroyer:
 			addrP := n.DestroyAddr()
 			if addrP == nil {
-				log.Printf("[WARN] DestroyEdgeTransformer: %q (%T) has no destroy address", n.Name(), v)
+				if logEnabled {
+					log.Printf("[WARN] DestroyEdgeTransformer: %q (%T) has no destroy address", n.Name(), v)
+				}
 				continue
 			}
 			addr := *addrP
 
 			key := addr.String()
-			log.Printf("[TRACE] DestroyEdgeTransformer: %q (%T) destroys %s", n.Name(), v, key)
+			if logEnabled {
+				log.Printf("[TRACE] DestroyEdgeTransformer: %q (%T) destroys %s", n.Name(), v, key)
+			}
 			destroyers.Put(addr, append(destroyers.Get(addr), n))
 
 			resAddr := addr.ContainingResource().Config()
@@ -164,7 +180,7 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 			}
 
 			// NoOp changes should not participate in the destroy dependencies.
-			rc := t.Changes.ResourceInstance(*addr)
+			rc := changeFor(*addr)
 			if rc != nil && rc.Action != plans.NoOp {
 				creators.Put(cfgAddr, append(creators.Get(cfgAddr), n))
 			}
@@ -190,9 +206,11 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 		}
 
 		for _, destroyer := range destroyers.Get(*addr) {
-			log.Printf(
-				"[TRACE] DestroyEdgeTransformer: connecting creator %q with destroyer %q",
-				creator.Name(), destroyer.Name())
+			if logEnabled {
+				log.Printf(
+					"[TRACE] DestroyEdgeTransformer: connecting creator %q with destroyer %q",
+					creator.Name(), destroyer.Name())
+			}
 
 			g.Connect(creator, destroyer)
 		}
@@ -209,10 +227,14 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 			for _, resAddr := range ri.StateDependencies() {
 				for _, desDep := range destroyersByResource.Get(resAddr) {
 					if !graphNodesAreResourceInstancesInDifferentInstancesOfSameModule(c, desDep) {
-						log.Printf("[TRACE] DestroyEdgeTransformer: %s has stored dependency of %s\n", c.Name(), desDep.Name())
+						if logEnabled {
+							log.Printf("[TRACE] DestroyEdgeTransformer: %s has stored dependency of %s\n", c.Name(), desDep.Name())
+						}
 						g.Connect(c, desDep)
 					} else {
-						log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", c.Name(), desDep.Name())
+						if logEnabled {
+							log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", c.Name(), desDep.Name())
+						}
 					}
 				}
 			}
@@ -230,10 +252,14 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 			for _, resAddr := range ri.StateDependencies() {
 				for _, desDep := range destroyersByResource.Get(resAddr) {
 					if !graphNodesAreResourceInstancesInDifferentInstancesOfSameModule(desDep, des) {
-						log.Printf("[TRACE] DestroyEdgeTransformer: %s has stored dependency of %s\n", desDep.Name(), des.Name())
+						if logEnabled {
+							log.Printf("[TRACE] DestroyEdgeTransformer: %s has stored dependency of %s\n", desDep.Name(), des.Name())
+						}
 						t.tryInterProviderDestroyEdge(g, desDep, des)
 					} else {
-						log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", desDep.Name(), des.Name())
+						if logEnabled {
+							log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", desDep.Name(), des.Name())
+						}
 					}
 				}
 
@@ -242,10 +268,14 @@ func (t *DestroyEdgeTransformer) Transform(g *Graph) error {
 				// themselves, make the connection directly from the creator.
 				for _, createDep := range creators.Get(resAddr) {
 					if !graphNodesAreResourceInstancesInDifferentInstancesOfSameModule(createDep, des) {
-						log.Printf("[DEBUG] DestroyEdgeTransformer: %s has stored dependency of %s\n", createDep.Name(), des.Name())
+						if logEnabled {
+							log.Printf("[DEBUG] DestroyEdgeTransformer: %s has stored dependency of %s\n", createDep.Name(), des.Name())
+						}
 						t.tryInterProviderDestroyEdge(g, createDep, des)
 					} else {
-						log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", createDep.Name(), des.Name())
+						if logEnabled {
+							log.Printf("[TRACE] DestroyEdgeTransformer: skipping %s => %s inter-module-instance dependency\n", createDep.Name(), des.Name())
+						}
 					}
 				}
 			}
