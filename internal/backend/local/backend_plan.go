@@ -90,6 +90,7 @@ func (b *Local) opPlan(
 
 	// Set up backend and get our context
 	lr, configSnap, opState, ctxDiags := b.localRun(stopCtx, op)
+	logging.Phase("load configuration and providers")
 
 	diags = diags.Append(ctxDiags)
 	if ctxDiags.HasErrors() {
@@ -185,6 +186,7 @@ func (b *Local) opPlan(
 		}
 
 		log.Printf("[INFO] backend/local: writing plan output to: %s", path)
+		logging.Phase("plan: complete")
 		err := planfile.Create(path, planfile.CreateArgs{
 			ConfigSnapshot:       configSnap,
 			PreviousRunStateFile: prevStateFile,
@@ -205,6 +207,7 @@ func (b *Local) opPlan(
 
 	// Render the plan, if we produced one.
 	// (This might potentially be a partial plan with Errored set to true)
+	logging.Phase("write plan file")
 	schemas, moreDiags := lr.Core.Schemas(lr.Config, lr.InputState)
 	diags = diags.Append(moreDiags)
 	if moreDiags.HasErrors() {
@@ -221,6 +224,7 @@ func (b *Local) opPlan(
 	}
 
 	op.View.Plan(plan, schemas)
+	logging.Phase("render plan")
 
 	// If we've accumulated any diagnostics along the way then we'll show them
 	// here just before we show the summary and next steps. This can potentially

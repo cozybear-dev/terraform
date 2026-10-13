@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/globalref"
+	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/internal/moduletest/mocking"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/policy"
@@ -469,7 +470,9 @@ The -target option is not for routine use, and is provided only for exceptional 
 		return plan, evalScope, diags
 	}
 
+	logging.Phase("plan: finish")
 	diags = diags.Append(c.checkApplyGraph(plan, config, opts))
+	logging.Phase("plan: check apply graph")
 
 	return plan, evalScope, diags
 }
@@ -811,7 +814,9 @@ func (c *Context) planWalk(config *configs.Config, prevRunState *states.State, o
 		opts.PolicyClient = nil
 	}
 
+	logging.Phase("plan: prepare")
 	graph, walkOp, moreDiags := c.planGraph(config, prevRunState, opts)
+	logging.Phase("plan: build graph")
 	diags = diags.Append(moreDiags)
 	if diags.HasErrors() {
 		return nil, nil, diags
@@ -851,6 +856,7 @@ func (c *Context) planWalk(config *configs.Config, prevRunState *states.State, o
 		ProviderLocks:              opts.ProviderLocks,
 		PolicyClient:               opts.PolicyClient,
 	})
+	logging.Phase("plan: walk graph")
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)
 
@@ -917,6 +923,7 @@ func (c *Context) planWalk(config *configs.Config, prevRunState *states.State, o
 		}
 	}
 
+	logging.Phase("plan: collect results")
 	plan := &plans.Plan{
 		UIMode:             opts.Mode,
 		Changes:            changesSrc,

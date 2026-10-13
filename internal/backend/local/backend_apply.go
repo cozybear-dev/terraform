@@ -60,6 +60,7 @@ func (b *Local) opApply(
 
 	// Get our context
 	lr, _, opState, contextDiags := b.localRun(stopCtx, op)
+	logging.Phase("load configuration and providers")
 
 	diags = diags.Append(contextDiags)
 	if contextDiags.HasErrors() {
@@ -496,7 +497,9 @@ func (b *Local) opApply(
 
 	// Store the final state
 	runningOp.State = applyState
+	logging.Phase("apply: complete")
 	err := statemgr.WriteAndPersist(opState, applyState, schemas)
+	logging.Phase("write state")
 	if err != nil {
 		// Export the state file from the state manager and assign the new
 		// state. This is needed to preserve the existing serial and lineage.

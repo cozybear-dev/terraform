@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/lang"
+	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -87,6 +88,7 @@ func (c *Context) Validate(config *configs.Config, opts *ValidateOpts) tfdiags.D
 		return diags
 	}
 
+	logging.Phase("validate: prepare")
 	log.Printf("[DEBUG] Building and walking validate graph")
 
 	// Validate is to check if the given module is valid regardless of
@@ -118,6 +120,7 @@ func (c *Context) Validate(config *configs.Config, opts *ValidateOpts) tfdiags.D
 		queryPlan:                 opts.Query,
 		AllowRootEphemeralOutputs: opts.AllowRootEphemeralOutputs,
 	}).Build(addrs.RootModuleInstance)
+	logging.Phase("validate: build graph")
 	diags = diags.Append(moreDiags)
 	if moreDiags.HasErrors() {
 		return diags
@@ -128,6 +131,7 @@ func (c *Context) Validate(config *configs.Config, opts *ValidateOpts) tfdiags.D
 		FunctionResults:         lang.NewFunctionResultsTable(nil),
 		ExternalProviderConfigs: opts.ExternalProviders,
 	})
+	logging.Phase("validate: walk graph")
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)
 	if walkDiags.HasErrors() {

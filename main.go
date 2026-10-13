@@ -51,7 +51,10 @@ func init() {
 }
 
 func main() {
-	os.Exit(realMain())
+	stopProfiling := startProfiling()
+	code := realMain()
+	stopProfiling()
+	os.Exit(code)
 }
 
 func realMain() int {

@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/terraform/internal/configs/configload"
 	"github.com/hashicorp/terraform/internal/depsfile"
 	"github.com/hashicorp/terraform/internal/lang"
+	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/internal/plans/planfile"
 	"github.com/hashicorp/terraform/internal/states/statemgr"
 	"github.com/hashicorp/terraform/internal/terraform"
@@ -67,10 +68,12 @@ func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backen
 	}()
 
 	log.Printf("[TRACE] backend/local: reading remote state for workspace %q", op.Workspace)
+	logging.Phase("lock state")
 	if err := s.RefreshState(); err != nil {
 		diags = diags.Append(fmt.Errorf("error loading state: %w", err))
 		return nil, nil, nil, diags
 	}
+	logging.Phase("read state")
 
 	ret := &backendrun.LocalRun{
 		PolicyClient: op.PolicyClient,
@@ -140,6 +143,7 @@ func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backen
 			log.Printf("[TRACE] backend/local: running validation operation")
 			// TODO: Implement query validate command. op.Query is false when running the command "terraform validate"
 			opts := &terraform.ValidateOpts{Query: op.Query}
+			logging.Phase("load configuration")
 			validateDiags := ret.Core.Validate(ret.Config, opts)
 			diags = diags.Append(validateDiags)
 		}
