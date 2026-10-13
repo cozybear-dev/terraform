@@ -4,10 +4,13 @@
 package statefile
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
+	"unsafe"
 
 	version "github.com/hashicorp/go-version"
 	"github.com/zclconf/go-cty/cty"
@@ -57,6 +60,24 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 
 	state := states.NewState()
 
+	// The same module, provider and dependency addresses tend to appear
+	// many times in a large state, and parsing them is relatively
+	// expensive, so we remember the results of parsing each distinct
+	// string. We only remember successful results, so that we still
+	// generate diagnostics for every occurrence of an invalid one.
+	moduleAddrs := make(map[string]addrs.ModuleInstance)
+	providerAddrs := make(map[string]addrs.AbsProviderConfig)
+	depAddrs := make(map[string]addrs.ConfigResource)
+	sensitivePaths := make(map[string][]cty.Path)
+
+	// The dependencies of the most recent object we dealt with, for sharing
+	// them with the next object if it has the same dependencies.
+	var lastDepsSrc []byte
+	var lastDepsV4 *dependenciesV4
+	var lastDepsRaw []string
+	var lastDeps []addrs.ConfigResource
+	lastDepsShareable := false
+
 	for _, rsV4 := range sV4.Resources {
 		rAddr := addrs.Resource{
 			Type: rsV4.Type,
@@ -78,15 +99,29 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 
 		moduleAddr := addrs.RootModuleInstance
 		if rsV4.Module != "" {
-			var addrDiags tfdiags.Diagnostics
-			moduleAddr, addrDiags = addrs.ParseModuleInstanceStr(rsV4.Module)
-			diags = diags.Append(addrDiags)
-			if addrDiags.HasErrors() {
-				continue
+			var known bool
+			moduleAddr, known = moduleAddrs[rsV4.Module]
+			if !known {
+				var addrDiags tfdiags.Diagnostics
+				moduleAddr, addrDiags = addrs.ParseModuleInstanceStr(rsV4.Module)
+				diags = diags.Append(addrDiags)
+				if addrDiags.HasErrors() {
+					continue
+				}
+				if len(addrDiags) == 0 {
+					moduleAddrs[rsV4.Module] = moduleAddr
+				}
 			}
 		}
 
-		providerAddr, addrDiags := addrs.ParseAbsProviderConfigStr(rsV4.ProviderConfig)
+		providerAddr, known := providerAddrs[rsV4.ProviderConfig]
+		var addrDiags tfdiags.Diagnostics
+		if !known {
+			providerAddr, addrDiags = addrs.ParseAbsProviderConfigStr(rsV4.ProviderConfig)
+			if len(addrDiags) == 0 {
+				providerAddrs[rsV4.ProviderConfig] = providerAddr
+			}
+		}
 		if addrDiags.HasErrors() {
 			// If ParseAbsProviderConfigStr returns an error, the state may have
 			// been written before Provider FQNs were introduced and the
@@ -165,10 +200,21 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 
 			// Sensitive paths
 			if isV4.AttributeSensitivePaths != nil {
-				paths, pathsDiags := unmarshalPaths([]byte(isV4.AttributeSensitivePaths))
-				diags = diags.Append(pathsDiags)
-				if pathsDiags.HasErrors() {
-					continue
+				// The instances of a resource typically all have the same
+				// sensitive paths, which are then written identically, so
+				// we parse each distinct set only once. The result is
+				// treated as immutable, so the objects can share it.
+				paths, known := sensitivePaths[string(isV4.AttributeSensitivePaths)]
+				if !known {
+					var pathsDiags tfdiags.Diagnostics
+					paths, pathsDiags = unmarshalPaths([]byte(isV4.AttributeSensitivePaths))
+					diags = diags.Append(pathsDiags)
+					if pathsDiags.HasErrors() {
+						continue
+					}
+					if len(pathsDiags) == 0 {
+						sensitivePaths[string(isV4.AttributeSensitivePaths)] = paths
+					}
 				}
 				obj.AttrSensitivePaths = paths
 			}
@@ -195,18 +241,61 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 				obj.Private = raw
 			}
 
-			{
-				depsRaw := isV4.Dependencies
+			// Objects very often have exactly the same dependencies as the
+			// object before them, particularly when they are instances of
+			// the same resource, and then they can share a single slice,
+			// which is treated as immutable. In a state file those are
+			// written identically, so we can usually recognize that from
+			// the source alone, without needing to parse the addresses or
+			// even to extract them as strings.
+			var depsSrc []byte
+			if isV4.Dependencies != nil {
+				depsSrc = isV4.Dependencies.src
+			}
+			if lastDepsShareable && depsSrc != nil && (isV4.Dependencies == lastDepsV4 || bytes.Equal(depsSrc, lastDepsSrc)) {
+				obj.Dependencies = lastDeps
+			} else if isV4.Dependencies != nil && len(isV4.Dependencies.parsed) != 0 {
+				// These were parsed when the file was decoded.
+				obj.Dependencies = isV4.Dependencies.parsed
+				lastDepsRaw, lastDeps, lastDepsShareable = isV4.Dependencies.list, obj.Dependencies, true
+				lastDepsSrc, lastDepsV4 = depsSrc, isV4.Dependencies
+			} else if depsRaw, err := isV4.Dependencies.strings(); err != nil {
+				diags = diags.Append(tfdiags.Sourceless(
+					tfdiags.Error,
+					"Invalid resource instance metadata in state",
+					fmt.Sprintf("Instance %s has invalid dependencies: %s.", instAddr.Absolute(moduleAddr), err),
+				))
+				continue
+			} else if lastDepsShareable && slices.Equal(depsRaw, lastDepsRaw) {
+				obj.Dependencies = lastDeps
+				lastDepsSrc, lastDepsV4 = depsSrc, isV4.Dependencies
+			} else {
 				deps := make([]addrs.ConfigResource, 0, len(depsRaw))
+				shareable := true
 				for _, depRaw := range depsRaw {
+					if dep, known := depAddrs[depRaw]; known {
+						deps = append(deps, dep)
+						continue
+					}
 					addr, addrDiags := addrs.ParseAbsResourceStr(depRaw)
 					diags = diags.Append(addrDiags)
+					if len(addrDiags) != 0 {
+						// We must generate the same diagnostics again for
+						// any other object that has these dependencies.
+						shareable = false
+					}
 					if addrDiags.HasErrors() {
 						continue
 					}
-					deps = append(deps, addr.Config())
+					dep := addr.Config()
+					if len(addrDiags) == 0 {
+						depAddrs[depRaw] = dep
+					}
+					deps = append(deps, dep)
 				}
 				obj.Dependencies = deps
+				lastDepsRaw, lastDeps, lastDepsShareable = depsRaw, deps, shareable
+				lastDepsSrc, lastDepsV4 = depsSrc, isV4.Dependencies
 			}
 
 			switch {
@@ -418,20 +507,17 @@ func writeStateV4(file *File, w io.Writer) tfdiags.Diagnostics {
 
 	sV4.normalize()
 
-	src, err := json.MarshalIndent(sV4, "", "  ")
+	err := encodeStateV4(sV4, w)
 	if err != nil {
-		// Shouldn't happen if we do our conversion to *stateV4 correctly above.
-		diags = diags.Append(tfdiags.Sourceless(
-			tfdiags.Error,
-			"Failed to serialize state",
-			fmt.Sprintf("An error occured while serializing the state to save it. This is a bug in Terraform and should be reported: %s.", err),
-		))
-		return diags
-	}
-	src = append(src, '\n')
-
-	_, err = w.Write(src)
-	if err != nil {
+		if _, isWriteErr := err.(stateWriteError); !isWriteErr {
+			// Shouldn't happen if we do our conversion to *stateV4 correctly above.
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Failed to serialize state",
+				fmt.Sprintf("An error occured while serializing the state to save it. This is a bug in Terraform and should be reported: %s.", err),
+			))
+			return diags
+		}
 		diags = diags.Append(tfdiags.Sourceless(
 			tfdiags.Error,
 			"Failed to write state",
@@ -465,11 +551,6 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		privateRaw = obj.Private
 	}
 
-	deps := make([]string, len(obj.Dependencies))
-	for i, depAddr := range obj.Dependencies {
-		deps[i] = depAddr.String()
-	}
-
 	var rawKey interface{}
 	switch tk := key.(type) {
 	case addrs.IntKey:
@@ -499,7 +580,7 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		AttributesRaw:           obj.AttrsJSON,
 		AttributeSensitivePaths: attributeSensitivePaths,
 		PrivateRaw:              privateRaw,
-		Dependencies:            deps,
+		Dependencies:            newDependenciesV4Addrs(obj.Dependencies),
 		CreateBeforeDestroy:     obj.CreateBeforeDestroy,
 		IdentitySchemaVersion:   obj.IdentitySchemaVersion,
 		IdentityRaw:             obj.IdentityJSON,
@@ -716,9 +797,162 @@ type instanceObjectStateV4 struct {
 
 	PrivateRaw []byte `json:"private,omitempty"`
 
-	Dependencies []string `json:"dependencies,omitempty"`
+	Dependencies *dependenciesV4 `json:"dependencies,omitempty"`
 
 	CreateBeforeDestroy bool `json:"create_before_destroy,omitempty"`
+}
+
+// dependenciesV4 is the list of dependencies of a resource instance object.
+//
+// The dependencies can account for much of the size of a state, and in a
+// state file each one is a separate string. When reading we therefore only
+// keep the JSON source of the whole list to start with, because that's often
+// enough to recognize that an object has the same dependencies as the one
+// before it, and extracting all of the strings for every object is expensive.
+type dependenciesV4 struct {
+	// addrs is the dependencies themselves, which is set when writing.
+	// Many objects typically have exactly the same dependencies, either
+	// because they are instances of the same resource or because they were
+	// copied from the same object, and in that case they usually share a
+	// single slice, which the encoder can recognize in order to avoid
+	// encoding the same dependencies repeatedly.
+	addrs []addrs.ConfigResource
+
+	// list is the string representations of the dependencies, which is an
+	// alternative to addrs.
+	list []string
+
+	// src is the JSON source of the list, which is set when reading. In
+	// that case list is also set once something has asked for the strings,
+	// and those can refer directly to src, which is never modified.
+	src []byte
+
+	// parsed is the addresses that the dependencies represent, if those
+	// have already been determined and there was nothing to report about
+	// any of them. It's only ever set when there's at least one.
+	parsed []addrs.ConfigResource
+}
+
+// newDependenciesV4 returns the representation of the given dependencies
+// for writing, which is nil if there are none so that they'll be omitted.
+func newDependenciesV4(list []string) *dependenciesV4 {
+	if len(list) == 0 {
+		return nil
+	}
+	return &dependenciesV4{list: list}
+}
+
+// newDependenciesV4Addrs is like newDependenciesV4 but takes the addresses
+// themselves, which avoids building a string for each of them.
+func newDependenciesV4Addrs(deps []addrs.ConfigResource) *dependenciesV4 {
+	if len(deps) == 0 {
+		return nil
+	}
+	return &dependenciesV4{addrs: deps}
+}
+
+// strings returns the dependencies as a slice of strings, which the caller
+// must not modify.
+func (d *dependenciesV4) strings() ([]string, error) {
+	switch {
+	case d == nil:
+		return nil, nil
+	case d.list != nil:
+		return d.list, nil
+	case d.addrs != nil:
+		list := make([]string, len(d.addrs))
+		for i, addr := range d.addrs {
+			list[i] = addr.String()
+		}
+		return list, nil
+	case d.src == nil:
+		return nil, nil
+	}
+	if list, ok := parseSimpleStringArray(d.src); ok {
+		d.list = list
+		return list, nil
+	}
+	var list []string
+	if err := json.Unmarshal(d.src, &list); err != nil {
+		return nil, err
+	}
+	d.list = list
+	return list, nil
+}
+
+// parseSimpleStringArray decodes a JSON array of strings that consist only
+// of printable ASCII characters and have no escape sequences, which is
+// what the addresses of resources nearly always are. It returns false for
+// anything else, including an empty array. The strings in the result refer
+// directly to the given source, which must therefore never be modified.
+func parseSimpleStringArray(src []byte) ([]string, bool) {
+	i := skipJSONSpace(src, 0)
+	if i >= len(src) || src[i] != '[' {
+		return nil, false
+	}
+	i = skipJSONSpace(src, i+1)
+	// A rough guess at the number of elements, to avoid growing the result
+	// repeatedly: addresses are rarely shorter than this.
+	list := make([]string, 0, len(src)/24+1)
+	for {
+		if i >= len(src) || src[i] != '"' {
+			return nil, false
+		}
+		start := i + 1
+		end := start
+		for {
+			if end >= len(src) {
+				return nil, false
+			}
+			c := src[end]
+			if c == '"' {
+				break
+			}
+			if c == '\\' || c < 0x20 || c >= 0x7f {
+				return nil, false
+			}
+			end++
+		}
+		if end == start {
+			list = append(list, "")
+		} else {
+			list = append(list, unsafe.String(&src[start], end-start))
+		}
+		i = skipJSONSpace(src, end+1)
+		if i >= len(src) {
+			return nil, false
+		}
+		switch src[i] {
+		case ',':
+			i = skipJSONSpace(src, i+1)
+		case ']':
+			if skipJSONSpace(src, i+1) != len(src) {
+				return nil, false
+			}
+			return list, true
+		default:
+			return nil, false
+		}
+	}
+}
+
+func (d *dependenciesV4) MarshalJSON() ([]byte, error) {
+	if d.list == nil && d.addrs == nil && d.src != nil {
+		return d.src, nil
+	}
+	list, err := d.strings()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(list)
+}
+
+func (d *dependenciesV4) UnmarshalJSON(src []byte) error {
+	// The decoder has already checked that this is valid JSON, and reuses
+	// its buffer afterwards.
+	d.list = nil
+	d.src = bytes.Clone(src)
+	return nil
 }
 
 type checkResultsV4 struct {

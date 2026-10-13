@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	version "github.com/hashicorp/go-version"
 
@@ -61,7 +62,7 @@ func Read(r io.Reader) (*File, error) {
 	// We actually just buffer the whole thing in memory, because states are
 	// generally not huge and we need to do be able to sniff for a version
 	// number before full parsing.
-	src, err := io.ReadAll(r)
+	src, err := readAll(r)
 	if err != nil {
 		diags = diags.Append(tfdiags.Sourceless(
 			tfdiags.Error,
@@ -71,6 +72,14 @@ func Read(r io.Reader) (*File, error) {
 		return nil, diags.Err()
 	}
 
+	return ReadBytes(src)
+}
+
+// ReadBytes is like Read but for a caller that already has the entire content
+// of the state file in memory, which avoids making another copy of it.
+//
+// The result doesn't retain any reference to the given buffer.
+func ReadBytes(src []byte) (*File, error) {
 	if len(src) == 0 {
 		return nil, ErrNoState
 	}
@@ -85,7 +94,46 @@ func Read(r io.Reader) (*File, error) {
 		panic("readState returned nil state with no errors")
 	}
 
-	return state, diags.Err()
+	return state, nil
+}
+
+// readAll is like io.ReadAll except that, where it can determine how much
+// data there is to read, it allocates a buffer of the right size up front
+// rather than repeatedly growing and copying a smaller one, which is
+// significant for a large state file.
+func readAll(r io.Reader) ([]byte, error) {
+	size := 0
+	switch r := r.(type) {
+	case *os.File:
+		if info, err := r.Stat(); err == nil && info.Mode().IsRegular() {
+			if offset, err := r.Seek(0, io.SeekCurrent); err == nil && offset >= 0 && offset < info.Size() {
+				size = int(info.Size() - offset)
+			}
+		}
+	case interface{ Len() int }:
+		// As implemented by bytes.Reader, bytes.Buffer, and strings.Reader.
+		size = r.Len()
+	}
+	if size <= 0 {
+		return io.ReadAll(r)
+	}
+
+	// One extra byte of capacity allows the final read to report EOF
+	// without us needing to grow the buffer.
+	buf := readBuffer(size + 1)
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return buf, err
+		}
+	}
 }
 
 func readState(src []byte) (*File, error) {
@@ -98,6 +146,10 @@ func readState(src []byte) (*File, error) {
 			"The state is stored in a legacy binary format that is not supported since Terraform v0.7. To continue, first upgrade the state using Terraform 0.6.16 or earlier.",
 		))
 		return nil, errUnusable(diags.Err())
+	}
+
+	if file, ok := readStateV4Parallel(src); ok {
+		return file, nil
 	}
 
 	version, versionDiags := sniffJSONStateVersion(src)
@@ -230,3 +282,42 @@ func sniffJSONStateTerraformVersion(src []byte) string {
 const unsupportedFormat = "Unsupported state file format"
 
 const upgradeFailed = "State format upgrade failed"
+
+// readBuffers holds buffers given to RecycleReadBuffer, as pointers to
+// byte slices. It never holds many, and whatever isn't reused is released
+// when the garbage collector next runs.
+var readBuffers sync.Pool
+
+// minRecycledReadBuffer is the size of buffer below which recycling isn't
+// worthwhile.
+const minRecycledReadBuffer = 1 << 20
+
+// RecycleReadBuffer offers a buffer that the caller has finished with, for
+// reuse when Read next needs one of about the same size. The caller must not
+// use the buffer again afterwards.
+//
+// This is for a caller that reads the source of a large state itself and
+// passes it to ReadBytes, when another state of similar size is likely to be
+// read soon afterwards, as when applying a saved plan. Each source is as
+// large as the state it describes and is needed only briefly, but without
+// this they would all exist at once until the garbage collector next runs.
+func RecycleReadBuffer(buf []byte) {
+	if cap(buf) < minRecycledReadBuffer {
+		return
+	}
+	buf = buf[:0]
+	readBuffers.Put(&buf)
+}
+
+// readBuffer returns an empty buffer with at least the given capacity.
+func readBuffer(size int) []byte {
+	if size >= minRecycledReadBuffer {
+		if recycled, ok := readBuffers.Get().(*[]byte); ok {
+			// One that's much too large would waste more than it saves.
+			if buf := *recycled; cap(buf) >= size && cap(buf)-size <= size/4 {
+				return buf[:0]
+			}
+		}
+	}
+	return make([]byte, 0, size)
+}
