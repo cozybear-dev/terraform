@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/hashicorp/go-hclog"
@@ -50,6 +51,10 @@ var (
 	}
 
 	GraphTrace = os.Getenv(envGraphTrace) != ""
+
+	// enabled records whether the standard library logger is currently
+	// connected to logWriter. See IsEnabled.
+	enabled atomic.Bool
 )
 
 func init() {
@@ -59,10 +64,31 @@ func init() {
 	// set up the default std library logger to use our output
 	log.SetFlags(0)
 	log.SetPrefix("")
-	log.SetOutput(logWriter)
+	if logger.GetLevel() == hclog.Off {
+		// With logging disabled nothing can observe what we'd write through
+		// logWriter, unless a sink is registered later. The standard
+		// library logger skips formatting its arguments altogether when its
+		// output is io.Discard, which matters because Terraform Core
+		// generates a very large number of trace messages for a
+		// configuration with many resource instances.
+		log.SetOutput(io.Discard)
+	} else {
+		log.SetOutput(logWriter)
+		enabled.Store(true)
+	}
 }
 
-// SetupTempLog adds a new log sink which writes all logs to the given file.
+// IsEnabled returns true if messages written using the standard library
+// log package can currently be observed anywhere.
+//
+// The log functions are cheap to call when logging is disabled, but they
+// still evaluate their arguments, so callers in hot paths can use this to
+// avoid doing expensive work only to produce arguments for a log message
+// that will be discarded.
+func IsEnabled() bool {
+	return enabled.Load()
+}
+
 func RegisterSink(f *os.File) {
 	l, ok := logger.(hclog.InterceptLogger)
 	if !ok {
@@ -72,6 +98,11 @@ func RegisterSink(f *os.File) {
 	if f == nil {
 		return
 	}
+
+	// Sinks receive all messages regardless of the configured log level,
+	// so the standard library logger must now really produce them.
+	log.SetOutput(logWriter)
+	enabled.Store(true)
 
 	l.RegisterSink(hclog.NewSinkAdapter(&hclog.LoggerOptions{
 		Level:  hclog.Trace,
