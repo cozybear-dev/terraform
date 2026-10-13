@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/zclconf/go-cty/cty"
 
@@ -38,7 +39,97 @@ type SyncState struct {
 	state    *State
 	writable bool
 	lock     sync.RWMutex
+
+	// The following fields track when the resources in the state were last
+	// modified, to support [SyncState.ResourceGeneration]. generation is
+	// incremented for each modification. resourceGenerations records the
+	// value of generation for the latest modification that affected only a
+	// single resource, keyed by the string representation of the resource's
+	// address, and allGeneration records it for the latest modification
+	// that could have affected any resource.
+	generation          uint64
+	allGeneration       uint64
+	resourceGenerations map[string]uint64
+
+	// moduleSetGeneration is incremented each time the set of modules in
+	// the state might have changed, which is whenever a caller could have
+	// modified anything and whenever a narrower modification left the
+	// state with a different number of modules. Like the fields above, it
+	// must only be accessed while holding the lock.
+	moduleSetGeneration uint64
+
+	// moduleIndex is an index of the modules in the state that describes
+	// them as of moduleIndexGeneration, for [SyncState.ResourcesWhileRLocked].
+	// These two have their own lock because they are updated by callers
+	// that hold the main one only for reading.
+	moduleIndexLock       sync.Mutex
+	moduleIndex           *ModuleInstancesIndex
+	moduleIndexGeneration uint64
 }
+
+// ResourcesWhileRLocked returns the same as [State.Resources] would for the
+// state returned by [SyncState.RLock], which the caller must have called and
+// not yet released. The result is subject to the same rules as that state.
+//
+// This is for a caller that asks about many resources, such as once for
+// each resource in the configuration. State.Resources looks through every
+// module in the state to find the ones a resource could belong to, whereas
+// this keeps an index of them for as long as the set of modules is
+// unchanged.
+func (s *SyncState) ResourcesWhileRLocked(addr addrs.ConfigResource) []*Resource {
+	if !s.writable {
+		// The state can now be modified without our involvement, so we
+		// can't know whether an index is still current.
+		return s.state.Resources(addr)
+	}
+
+	s.moduleIndexLock.Lock()
+	if s.moduleIndex == nil || s.moduleIndexGeneration != s.moduleSetGeneration {
+		s.moduleIndex = s.state.IndexModuleInstances()
+		s.moduleIndexGeneration = s.moduleSetGeneration
+	}
+	idx := s.moduleIndex
+	s.moduleIndexLock.Unlock()
+
+	var ret []*Resource
+	for _, m := range idx.ModuleInstances(addr.Module) {
+		r := m.Resource(addr.Resource)
+		if r != nil {
+			ret = append(ret, r)
+		}
+	}
+	return ret
+}
+
+// ResourceGeneration returns a number that is different each time anything
+// about the resource with the given address has potentially changed in the
+// state.
+//
+// A caller that derives something expensive from the state of a resource can
+// call this before reading the resource and remember the result alongside
+// what it derived. The derived data is then still current for as long as
+// ResourceGeneration continues to return the same number.
+//
+// Once [SyncState.Close] has been called the state can be modified without
+// the SyncState being involved, and so from then on every call returns a
+// different number.
+func (s *SyncState) ResourceGeneration(addr addrs.AbsResource) uint64 {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if !s.writable {
+		return untrackedGenerations.Add(1)
+	}
+	return max(s.allGeneration, s.resourceGenerations[addr.String()])
+}
+
+// untrackedGenerations provides the results of [SyncState.ResourceGeneration]
+// for states whose modifications can no longer be tracked. It starts well
+// beyond the range of the numbers used for tracked modifications.
+var untrackedGenerations = func() *atomic.Uint64 {
+	var ret atomic.Uint64
+	ret.Store(1 << 62)
+	return &ret
+}()
 
 // Module returns a snapshot of the state of the module instance with the given
 // address, or nil if no such module is tracked.
@@ -101,7 +192,7 @@ func (s *SyncState) SetOutputValue(addr addrs.AbsOutputValue, value cty.Value, s
 		return
 	}
 
-	defer s.beginWrite()()
+	defer s.beginOutputWrite()()
 	s.state.SetOutputValue(addr, value, sensitive)
 }
 
@@ -115,7 +206,7 @@ func (s *SyncState) RemoveOutputValue(addr addrs.AbsOutputValue) {
 		return
 	}
 
-	defer s.beginWrite()()
+	defer s.beginOutputWrite()()
 	s.state.RemoveOutputValue(addr)
 }
 
@@ -191,11 +282,48 @@ func (s *SyncState) ResourceInstanceObject(addr addrs.AbsResourceInstance, dk De
 	return inst.Object(dk).DeepCopy()
 }
 
+// RememberDecodedResourceInstanceObject records that decoding the given
+// source object, which must be a snapshot previously returned for the given
+// address by one of the methods of this SyncState, produced the given result,
+// so that later snapshots of the same object can be decoded without parsing
+// the serialized attributes again.
+//
+// Decoding the same object repeatedly is otherwise a significant cost when
+// evaluating references to resources whose instances are not themselves
+// being changed, because nothing else causes the decoded value to be
+// retained. This does nothing if the object in the state is no longer the
+// one that the snapshot was taken from.
+func (s *SyncState) RememberDecodedResourceInstanceObject(addr addrs.AbsResourceInstance, dk DeposedKey, src *ResourceInstanceObjectSrc, decoded *ResourceInstanceObject) {
+	if src == nil || decoded == nil || decoded.Value == cty.NilVal {
+		return
+	}
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if !s.writable {
+		// Once the state is closed it can be read without holding the lock.
+		return
+	}
+
+	inst := s.state.ResourceInstance(addr)
+	if inst == nil {
+		return
+	}
+	current := inst.Object(dk)
+	if current == nil || current.decodeValueCache != cty.NilVal || !current.sameSource(src) {
+		return
+	}
+	current.decodeValueCache = decoded.Value
+	if current.decodeIdentityCache == cty.NilVal {
+		current.decodeIdentityCache = decoded.Identity
+	}
+}
+
 // SetResourceMeta updates the resource-level metadata for the resource at
 // the given address, creating the containing module state and resource state
 // as a side-effect if not already present.
 func (s *SyncState) SetResourceProvider(addr addrs.AbsResource, provider addrs.AbsProviderConfig) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr)()
 
 	ms := s.state.EnsureModule(addr.Module)
 	ms.SetResourceProvider(addr.Resource, provider)
@@ -262,7 +390,7 @@ func (s *SyncState) RemoveResourceIfEmpty(addr addrs.AbsResource) bool {
 // If the containing module for this resource or the resource itself are not
 // already tracked in state then they will be added as a side-effect.
 func (s *SyncState) SetResourceInstanceCurrent(addr addrs.AbsResourceInstance, obj *ResourceInstanceObjectSrc, provider addrs.AbsProviderConfig) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.EnsureModule(addr.Module)
 	ms.SetResourceInstanceCurrent(addr.Resource, obj.DeepCopy(), provider)
@@ -293,7 +421,7 @@ func (s *SyncState) SetResourceInstanceCurrent(addr addrs.AbsResourceInstance, o
 // If the containing module for this resource or the resource itself are not
 // already tracked in state then they will be added as a side-effect.
 func (s *SyncState) SetResourceInstanceDeposed(addr addrs.AbsResourceInstance, key DeposedKey, obj *ResourceInstanceObjectSrc, provider addrs.AbsProviderConfig) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.EnsureModule(addr.Module)
 	ms.SetResourceInstanceDeposed(addr.Resource, key, obj.DeepCopy(), provider)
@@ -312,7 +440,7 @@ func (s *SyncState) SetResourceInstanceDeposed(addr addrs.AbsResourceInstance, k
 // given instance, and so NotDeposed will be returned without modifying the
 // state at all.
 func (s *SyncState) DeposeResourceInstanceObject(addr addrs.AbsResourceInstance) DeposedKey {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.Module(addr.Module)
 	if ms == nil {
@@ -327,7 +455,7 @@ func (s *SyncState) DeposeResourceInstanceObject(addr addrs.AbsResourceInstance)
 // that there aren't any races to use a particular key; this method will panic
 // if the given key is already in use.
 func (s *SyncState) DeposeResourceInstanceObjectForceKey(addr addrs.AbsResourceInstance, forcedKey DeposedKey) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	if forcedKey == NotDeposed {
 		// Usage error: should use DeposeResourceInstanceObject in this case
@@ -345,7 +473,7 @@ func (s *SyncState) DeposeResourceInstanceObjectForceKey(addr addrs.AbsResourceI
 // ForgetResourceInstanceAll removes the record of all objects associated with
 // the specified resource instance, if present. If not present, this is a no-op.
 func (s *SyncState) ForgetResourceInstanceAll(addr addrs.AbsResourceInstance) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.Module(addr.Module)
 	if ms == nil {
@@ -358,7 +486,7 @@ func (s *SyncState) ForgetResourceInstanceAll(addr addrs.AbsResourceInstance) {
 // ForgetResourceInstanceCurrent removes the record of the current object with
 // the given address, if present. If not present, this is a no-op.
 func (s *SyncState) ForgetResourceInstanceCurrent(addr addrs.AbsResourceInstance) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.Module(addr.Module)
 	if ms == nil {
@@ -371,7 +499,7 @@ func (s *SyncState) ForgetResourceInstanceCurrent(addr addrs.AbsResourceInstance
 // ForgetResourceInstanceDeposed removes the record of the deposed object with
 // the given address and key, if present. If not present, this is a no-op.
 func (s *SyncState) ForgetResourceInstanceDeposed(addr addrs.AbsResourceInstance, key DeposedKey) {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	ms := s.state.Module(addr.Module)
 	if ms == nil {
@@ -389,7 +517,7 @@ func (s *SyncState) ForgetResourceInstanceDeposed(addr addrs.AbsResourceInstance
 // Returns true if the object was restored to current, or false if no change
 // was made at all.
 func (s *SyncState) MaybeRestoreResourceInstanceDeposed(addr addrs.AbsResourceInstance, key DeposedKey) bool {
-	defer s.beginWrite()()
+	defer s.beginResourceWrite(addr.ContainingResource())()
 
 	if key == NotDeposed {
 		panic("MaybeRestoreResourceInstanceDeposed called without DeposedKey")
@@ -484,7 +612,48 @@ func (s *SyncState) RecordCheckResults(checkState *checks.State) {
 // accessors and mutators provided directly on SyncState.
 func (s *SyncState) Lock() *State {
 	s.lock.Lock()
+	// We can't know what the caller will do with the state, so we must
+	// assume that it will modify it.
+	s.generation++
+	s.allGeneration = s.generation
+	s.moduleSetGeneration++
 	return s.state
+}
+
+// Snapshot returns a copy of the entire state as it is right now, or nil
+// if [SyncState.Close] has already been called.
+//
+// This is for callers that need to capture the state at a time of their own
+// choosing while it's still being modified, such as to periodically save
+// the progress of a long-running operation. It returns nil once the state
+// is closed because the state can then be modified without the involvement
+// of the SyncState, and so can no longer be read safely from here.
+func (s *SyncState) Snapshot() *State {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if !s.writable {
+		return nil
+	}
+	return s.state.DeepCopy()
+}
+
+// RLock acquires an explicit read lock on the state, allowing direct read
+// access to the returned state object while preventing concurrent
+// modifications. The caller must not modify the state, must call RUnlock
+// once access is no longer needed, and must then immediately discard the
+// state pointer.
+//
+// Use this instead of [SyncState.Lock] when only reading, because other
+// readers can then proceed at the same time.
+func (s *SyncState) RLock() *State {
+	s.lock.RLock()
+	return s.state
+}
+
+// RUnlock releases a lock previously acquired by RLock, at which point the
+// caller must cease all use of the state pointer that was returned.
+func (s *SyncState) RUnlock() {
+	s.lock.RUnlock()
 }
 
 // Unlock releases a lock previously acquired by Lock, at which point the
@@ -570,6 +739,48 @@ func (s *SyncState) MaybeMoveModuleInstance(src, dst addrs.ModuleInstance) bool 
 }
 
 func (s *SyncState) beginWrite() func() {
+	unlock := s.lockForWrite()
+	// Callers of this function can modify anything in the state.
+	s.generation++
+	s.allGeneration = s.generation
+	s.moduleSetGeneration++
+	return unlock
+}
+
+// beginResourceWrite is like beginWrite but for a caller that will modify
+// only the given resource and its instances.
+func (s *SyncState) beginResourceWrite(addr addrs.AbsResource) func() {
+	unlock := s.lockForWrite()
+	s.generation++
+	if s.resourceGenerations == nil {
+		s.resourceGenerations = make(map[string]uint64)
+	}
+	s.resourceGenerations[addr.String()] = s.generation
+	return s.noteModuleSetChange(unlock)
+}
+
+// noteModuleSetChange wraps the given function, which releases the lock
+// after a modification that can add or remove at most the one module that
+// the modified object belongs to, so that it first records whether that
+// happened. Such a modification changes the set of modules exactly when it
+// changes how many there are.
+func (s *SyncState) noteModuleSetChange(unlock func()) func() {
+	before := len(s.state.Modules)
+	return func() {
+		if len(s.state.Modules) != before {
+			s.moduleSetGeneration++
+		}
+		unlock()
+	}
+}
+
+// beginOutputWrite is like beginWrite but for a caller that will modify only
+// output values, and so cannot affect any resource.
+func (s *SyncState) beginOutputWrite() func() {
+	return s.noteModuleSetChange(s.lockForWrite())
+}
+
+func (s *SyncState) lockForWrite() func() {
 	s.lock.Lock()
 	if !s.writable {
 		s.lock.Unlock()

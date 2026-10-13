@@ -125,6 +125,7 @@ func (ms *Module) SetResourceInstanceCurrent(addr addrs.ResourceInstance, obj *R
 	}
 	// Update the resource's ProviderConfig, in case the provider has updated
 	rs.ProviderConfig = provider
+	obj.shareUnchangedData(is.Current)
 	is.Current = obj
 }
 

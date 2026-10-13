@@ -102,11 +102,86 @@ func (s *State) Module(addr addrs.ModuleInstance) *Module {
 func (s *State) ModuleInstances(addr addrs.Module) []*Module {
 	var ms []*Module
 	for _, m := range s.Modules {
-		if m.Addr.Module().Equal(addr) {
+		if moduleInstanceIsOf(m.Addr, addr) {
 			ms = append(ms, m)
 		}
 	}
 	return ms
+}
+
+// ModuleInstancesIndex finds the modules in a state that are instances of
+// a given module, like [State.ModuleInstances], for a caller that asks about
+// many modules. ModuleInstances looks through every module in the state each
+// time, so asking it about every module or resource in a large configuration
+// takes time in proportion to the size of the configuration multiplied by
+// the size of the state.
+//
+// An index describes the state as it was when [State.IndexModuleInstances]
+// built it, so it must be discarded if a module is then added to the state,
+// removed from it or moved within it.
+type ModuleInstancesIndex struct {
+	byModule map[string][]*Module
+}
+
+// IndexModuleInstances returns an index of the modules currently in the
+// state by the module that each is an instance of.
+func (s *State) IndexModuleInstances() *ModuleInstancesIndex {
+	idx := &ModuleInstancesIndex{
+		byModule: make(map[string][]*Module),
+	}
+	var key []byte
+	for _, m := range s.Modules {
+		key = key[:0]
+		for _, step := range m.Addr {
+			key = appendModuleIndexKey(key, step.Name)
+		}
+		// The conversion in the lookup doesn't allocate, so a new string
+		// is only made for the first instance of each module.
+		if found, ok := idx.byModule[string(key)]; ok {
+			idx.byModule[string(key)] = append(found, m)
+		} else {
+			idx.byModule[string(key)] = []*Module{m}
+		}
+	}
+	return idx
+}
+
+// ModuleInstances returns the modules that were instances of the given
+// module when the index was built. The caller must not modify the result.
+func (idx *ModuleInstancesIndex) ModuleInstances(addr addrs.Module) []*Module {
+	var buf [128]byte
+	key := buf[:0]
+	for _, name := range addr {
+		key = appendModuleIndexKey(key, name)
+	}
+	return idx.byModule[string(key)]
+}
+
+// appendModuleIndexKey appends one module call name to a key of a
+// ModuleInstancesIndex.
+func appendModuleIndexKey(key []byte, name string) []byte {
+	// A module call name is an identifier, so this can't be part of one.
+	key = append(key, 0)
+	return append(key, name...)
+}
+
+// moduleInstanceIsOf returns true if the given module instance is an
+// instance of the given module, which is to say that inst.Module() equals
+// addr.
+//
+// It answers that without building the address of the instance's module,
+// because ModuleInstances asks it about every module in the state, and is
+// itself called for each resource in the configuration.
+func moduleInstanceIsOf(inst addrs.ModuleInstance, addr addrs.Module) bool {
+	if len(inst) != len(addr) {
+		return false
+	}
+	for i, step := range inst {
+		if step.Name != addr[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // RemoveModule removes the module with the given address from the state,
@@ -132,6 +207,84 @@ func (s *State) RootModule() *Module {
 		panic("RootModule called on nil State")
 	}
 	return s.Modules[addrs.RootModuleInstance.String()]
+}
+
+// ForgetDecodedValues discards the decoded form of each resource instance
+// object's attributes that the state might be retaining to make decoding
+// the same object again cheap.
+//
+// The decoded values can use considerably more memory than the serialized
+// attributes they were decoded from. A caller that is finished with
+// evaluating expressions against a state, but still needs the state itself,
+// can use this to allow that memory to be reclaimed. It has no effect on the
+// content of the state: anything that decodes an object afterwards just
+// does so from its serialized form.
+//
+// The caller must ensure that the state is not being accessed concurrently.
+func (s *State) ForgetDecodedValues() {
+	if s == nil {
+		return
+	}
+	for _, ms := range s.Modules {
+		for _, rs := range ms.Resources {
+			for _, is := range rs.Instances {
+				if is == nil {
+					continue
+				}
+				if is.Current != nil {
+					is.Current.decodeValueCache = cty.NilVal
+					is.Current.decodeIdentityCache = cty.NilVal
+				}
+				for _, obj := range is.Deposed {
+					if obj != nil {
+						obj.decodeValueCache = cty.NilVal
+						obj.decodeIdentityCache = cty.NilVal
+					}
+				}
+			}
+		}
+	}
+}
+
+// ShareUnchangedDataFrom arranges for the resource instance objects in the
+// receiver to use the same memory as the corresponding objects in the given
+// state for their serialized attributes and for their dependencies, wherever
+// the two have exactly the same content.
+//
+// This is useful when two states were loaded separately but are expected to
+// be mostly the same, such as the snapshots saved in a plan file and the
+// latest state snapshot they were created from, because otherwise each
+// retains its own copy of data that typically accounts for almost all of
+// the size of a state. It doesn't change the content of either state. The
+// shared data is immutable by convention.
+//
+// The caller must ensure that neither state is being accessed concurrently.
+func (s *State) ShareUnchangedDataFrom(other *State) {
+	if s == nil || other == nil {
+		return
+	}
+	for moduleKey, ms := range s.Modules {
+		otherMS := other.Modules[moduleKey]
+		if otherMS == nil {
+			continue
+		}
+		for resourceKey, rs := range ms.Resources {
+			otherRS := otherMS.Resources[resourceKey]
+			if otherRS == nil {
+				continue
+			}
+			for instanceKey, is := range rs.Instances {
+				otherIS := otherRS.Instances[instanceKey]
+				if is == nil || otherIS == nil {
+					continue
+				}
+				is.Current.shareUnchangedData(otherIS.Current)
+				for deposedKey, obj := range is.Deposed {
+					obj.shareUnchangedData(otherIS.Deposed[deposedKey])
+				}
+			}
+		}
+	}
 }
 
 // EnsureModule returns the state for the module with the given address,
