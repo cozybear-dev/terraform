@@ -37,8 +37,23 @@ find out how a move would go without anything changing.
 ### What it does
 
 The fork is a version of upstream with the fork's own commits on top, about
-thirty of them, one for each area it changes. Moving it means taking the new
-version of upstream and putting those same commits on top of that instead.
+thirty of them, one for each area it changes. Those commits are the
+performance work, and they are on the `perf/v<version>` branches, not on
+this one. Moving the fork means taking the new version of upstream and
+putting those same commits on top of that instead:
+
+```
+what it starts from:  upstream v1.17.0-rc1 ─ the fork's commits            = perf/v1.17.0-rc1
+what it makes:        upstream v1.17.0     ─ the same commits, replayed    = perf/v1.17.0
+```
+
+What it starts from is the fork's newest `perf/v<version>` branch, which it
+finds by itself. The file `fork-proof/UPSTREAM_REF` on that branch says
+which commit of upstream the branch is on, and every commit after that one
+is the fork's. The branch it starts from is left as it was, and the branch
+it makes is what the next move starts from. To see the fork's commits on
+their own, compare a branch with the tag it's named for:
+`https://github.com/cozybear-dev/terraform/compare/v1.17.0-rc1...perf/v1.17.0-rc1`.
 
 1. **Replay.** A script replays the fork's commits, in order, onto the new
    tag. Most of the time each one applies as it is.
