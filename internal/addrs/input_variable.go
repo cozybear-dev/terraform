@@ -3,10 +3,6 @@
 
 package addrs
 
-import (
-	"fmt"
-)
-
 // InputVariable is the address of an input variable.
 type InputVariable struct {
 	referenceable
@@ -64,7 +60,7 @@ func (v AbsInputVariableInstance) String() string {
 		return v.Variable.String()
 	}
 
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.Variable.String())
+	return v.Module.String() + "." + v.Variable.String()
 }
 
 func (v AbsInputVariableInstance) UniqueKey() UniqueKey {
@@ -119,7 +115,7 @@ func (v ConfigInputVariable) String() string {
 		return v.Variable.String()
 	}
 
-	return fmt.Sprintf("%s.%s", v.Module.String(), v.Variable.String())
+	return v.Module.String() + "." + v.Variable.String()
 }
 
 type configInputVariableUniqueKey string

@@ -5,6 +5,7 @@ package addrs
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -83,7 +84,7 @@ func (k IntKey) instanceKeySigil() {
 }
 
 func (k IntKey) String() string {
-	return fmt.Sprintf("[%d]", int(k))
+	return "[" + strconv.Itoa(int(k)) + "]"
 }
 
 func (k IntKey) Value() cty.Value {
@@ -101,7 +102,7 @@ func (k StringKey) String() string {
 	// We use HCL's quoting syntax here so that we can in principle parse
 	// an address constructed by this package as if it were an HCL
 	// traversal, even if the string contains HCL's own metacharacters.
-	return fmt.Sprintf("[%s]", toHCLQuotedString(string(k)))
+	return "[" + toHCLQuotedString(string(k)) + "]"
 }
 
 func (k StringKey) Value() cty.Value {
