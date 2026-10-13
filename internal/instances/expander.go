@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/terraform/internal/addrs"
@@ -44,6 +45,45 @@ import (
 type Expander struct {
 	mu   sync.RWMutex
 	exps *expanderModule
+
+	// moduleInstances and unknownModuleInstances remember the results of
+	// [Expander.ExpandModule] and [Expander.UnknownModuleInstances], with
+	// keys from moduleExpansionKey.
+	//
+	// Those are asked for by every graph node that belongs to a module, so
+	// in a large configuration they're asked for a great many times for
+	// each module, while the expansions of new module calls are being
+	// registered. With all of that going through the lock, the nodes spend
+	// much of their time queueing for it.
+	//
+	// The results can be remembered because they are final once we can
+	// produce them at all: answering either question requires every module
+	// call on the path to have had its expansion registered already, and an
+	// expansion never changes once it has been registered.
+	moduleInstances        sync.Map // of []addrs.ModuleInstance
+	unknownModuleInstances sync.Map // of addrs.Set[addrs.PartialExpandedModule]
+}
+
+// moduleExpansionKey returns the key for the given module and option in the
+// expander's records of earlier results.
+func moduleExpansionKey(addr addrs.Module, includeDirectOverrides bool) string {
+	n := 1
+	for _, name := range addr {
+		n += len(name) + 1
+	}
+	var buf strings.Builder
+	buf.Grow(n)
+	if includeDirectOverrides {
+		buf.WriteByte('+')
+	} else {
+		buf.WriteByte('-')
+	}
+	for _, name := range addr {
+		// A module call name is an identifier, so this can't be part of one.
+		buf.WriteByte(0)
+		buf.WriteString(name)
+	}
+	return buf.String()
 }
 
 // NewExpander initializes and returns a new Expander, empty and ready to use.
@@ -206,6 +246,17 @@ func (e *Expander) expandModule(addr addrs.Module, skipUnregistered, includeDire
 		return singletonRootModule
 	}
 
+	// We can only remember a result that required everything on the path
+	// to be registered, which isn't so when we're skipping what isn't.
+	var key string
+	if !skipUnregistered {
+		key = moduleExpansionKey(addr, includeDirectOverrides)
+		if known, ok := e.moduleInstances.Load(key); ok {
+			// Each caller gets its own slice, as it would have otherwise.
+			return slices.Clone(known.([]addrs.ModuleInstance))
+		}
+	}
+
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -219,6 +270,9 @@ func (e *Expander) expandModule(addr addrs.Module, skipUnregistered, includeDire
 	sort.SliceStable(ret, func(i, j int) bool {
 		return ret[i].Less(ret[j])
 	})
+	if !skipUnregistered {
+		e.moduleInstances.Store(key, slices.Clone(ret))
+	}
 	return ret
 }
 
@@ -242,12 +296,27 @@ func (e *Expander) UnknownModuleInstances(addr addrs.Module, includeDirectOverri
 		return nil
 	}
 
+	key := moduleExpansionKey(addr, includeDirectOverrides)
+	if known, ok := e.unknownModuleInstances.Load(key); ok {
+		// Each caller gets its own set, as it would have otherwise.
+		ret := addrs.MakeSet[addrs.PartialExpandedModule]()
+		for _, elem := range known.(addrs.Set[addrs.PartialExpandedModule]) {
+			ret.Add(elem)
+		}
+		return ret
+	}
+
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	ret := addrs.MakeSet[addrs.PartialExpandedModule]()
 	parentAddr := make(addrs.ModuleInstance, 0, 4)
 	e.exps.partialExpandedModuleInstances(addr, parentAddr, includeDirectOverrides, ret)
+	remembered := addrs.MakeSet[addrs.PartialExpandedModule]()
+	for _, elem := range ret {
+		remembered.Add(elem)
+	}
+	e.unknownModuleInstances.Store(key, remembered)
 	return ret
 }
 
@@ -648,8 +717,15 @@ func (m *expanderModule) moduleInstances(addr addrs.Module, parentAddr addrs.Mod
 
 	// If there's more than one step remaining then we need to traverse deeper.
 	if len(addr) > 1 {
-		for step, inst := range m.childInstances {
-			if step.Name != callName {
+		// The instances of this call are the ones that were registered
+		// along with its expansion, so we find each of them by its key
+		// rather than looking through the instances of every call in this
+		// module, of which there can be a great many.
+		_, knownKeys, _ := exp.instanceKeys()
+		for _, key := range knownKeys {
+			step := addrs.ModuleInstanceStep{Name: callName, InstanceKey: key}
+			inst, ok := m.childInstances[step]
+			if !ok {
 				continue
 			}
 			instAddr := append(parentAddr, step)
@@ -722,8 +798,13 @@ func (m *expanderModule) partialExpandedModuleInstances(addr addrs.Module, paren
 	// If this step already has everything expanded then we need to
 	// search inside it to see if it has any unexpanded descendants.
 	if len(addr) > 1 {
-		for step, inst := range m.childInstances {
-			if step.Name != callName {
+		// As in moduleInstances, we find the instances of this call by
+		// their keys.
+		_, knownKeys, _ := exp.instanceKeys()
+		for _, key := range knownKeys {
+			step := addrs.ModuleInstanceStep{Name: callName, InstanceKey: key}
+			inst, ok := m.childInstances[step]
+			if !ok {
 				continue
 			}
 			// The results retain this address, so each instance needs its own
@@ -741,7 +822,8 @@ func (m *expanderModule) moduleResourceInstances(moduleAddr addrs.Module, resour
 		// then iterate resource expansions in the context of each module
 		// path leading to them.
 		callName := moduleAddr[0]
-		if exp, ok := m.moduleCalls[addrs.ModuleCall{Name: callName}]; !ok {
+		exp, ok := m.moduleCalls[addrs.ModuleCall{Name: callName}]
+		if !ok {
 			// This is a bug in the caller, because it should always register
 			// expansions for an object and all of its ancestors before requesting
 			// expansion of it.
@@ -751,8 +833,13 @@ func (m *expanderModule) moduleResourceInstances(moduleAddr addrs.Module, resour
 			return nil
 		}
 
-		for step, inst := range m.childInstances {
-			if step.Name != callName {
+		// As in moduleInstances, we find the instances of this call by
+		// their keys.
+		_, knownKeys, _ := exp.instanceKeys()
+		for _, key := range knownKeys {
+			step := addrs.ModuleInstanceStep{Name: callName, InstanceKey: key}
+			inst, ok := m.childInstances[step]
+			if !ok {
 				continue
 			}
 			moduleInstAddr := append(parentAddr, step)
@@ -832,8 +919,11 @@ func (m *expanderModule) partialExpandedResourceInstances(moduleAddr addrs.Modul
 
 		// If we get here then we can continue exploring all of the known
 		// instances of this current module call.
-		for step, inst := range m.childInstances {
-			if step.Name != callName {
+		_, knownKeys, _ := exp.instanceKeys()
+		for _, key := range knownKeys {
+			step := addrs.ModuleInstanceStep{Name: callName, InstanceKey: key}
+			inst, ok := m.childInstances[step]
+			if !ok {
 				continue
 			}
 			instAddr := parentAddr.Child(step.Name, step.InstanceKey)
