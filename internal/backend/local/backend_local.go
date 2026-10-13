@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -122,6 +123,19 @@ func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backen
 	diags = diags.Append(ctxDiags)
 	if diags.HasErrors() {
 		return ret, nil, nil, diags
+	}
+
+	if ret.InputState != nil && countResourceInstances(ret.InputState, stateLargeInstanceCount) >= stateLargeInstanceCount {
+		// Loading a large state, and a saved plan if there is one, leaves
+		// behind a lot of garbage: the raw content of each file and the
+		// intermediate results of parsing it, which together are several
+		// times the size of what we've kept. The garbage collector would
+		// otherwise let the heap grow to twice the size it has reached now
+		// before reclaiming any of that, so we ask it to do so immediately,
+		// which costs little while there is still relatively little live
+		// data and significantly reduces the peak memory usage of the
+		// operation that follows.
+		debug.FreeOSMemory()
 	}
 
 	// If we have an operation, then we automatically do the input/validate

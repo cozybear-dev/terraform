@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime/debug"
 
 	"github.com/hashicorp/terraform/internal/backend/backendrun"
 	"github.com/hashicorp/terraform/internal/genconfig"
@@ -147,6 +148,21 @@ func (b *Local) opPlan(
 
 	// Record whether this plan includes any side-effects that could be applied.
 	runningOp.PlanEmpty = !plan.Applyable
+
+	// Planning is complete, so nothing else in this operation will evaluate
+	// expressions against the states recorded in the plan. They might still
+	// be holding the decoded form of every object from when that was needed,
+	// which for a large state is a lot of memory that we can now release
+	// before the remaining work of saving and rendering the plan.
+	plan.PriorState.ForgetDecodedValues()
+	plan.PrevRunState.ForgetDecodedValues()
+	if countResourceInstances(plan.PriorState, stateLargeInstanceCount) >= stateLargeInstanceCount {
+		// Everything else that planning allocated is garbage now too, and
+		// for a large state there's a lot of it. Saving the plan needs a
+		// significant amount of memory of its own, so we reclaim what we
+		// can first rather than letting one be added to the other.
+		debug.FreeOSMemory()
+	}
 
 	// Save the plan to disk
 	if path := op.PlanOutPath; path != "" {
