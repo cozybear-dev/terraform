@@ -69,11 +69,13 @@ backports_at() {
 		grep -v '^[[:space:]]*#' | awk 'NF { print $1 }' || true
 }
 
-# json_field prints one top-level field of a JSON file, or "unknown".
+# json_field prints one top-level field of a JSON file, or "unknown". An
+# amount of money is printed as one.
 json_field() {
 	python3 -c 'import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get(sys.argv[2], "unknown"))
+    value = json.load(open(sys.argv[1])).get(sys.argv[2], "unknown")
+    print("%.2f" % value if isinstance(value, float) else value)
 except Exception:
     print("unknown")' "$1" "$2"
 }
@@ -383,7 +385,7 @@ summary() {
 		echo "| From | \`$FROM_NAME\` at \`${FROM_HEAD:0:12}\`, on upstream \`${OLD:0:12}\` |"
 		echo "| To | upstream \`$TARGET\` (\`${NEW:0:12}\`) |"
 		echo "| Outcome | **$outcome** |"
-		local cost=0 file
+		local cost=0 file round said
 		for file in "$OUT"/agent-*.json; do
 			[ -f "$file" ] || continue
 			cost=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[2]), 2))' "$cost" "$(json_field "$file" total_cost_usd | sed 's/unknown/0/')")
@@ -450,6 +452,28 @@ summary() {
 			cat "$NOTES"
 			echo
 		fi
+
+		# How each round ended, in Claude's words, which is also where it
+		# says so if it couldn't start at all.
+		for file in "$OUT"/agent-*.json; do
+			[ -f "$file" ] || continue
+			round=${file##*/agent-}
+			echo "### How round ${round%.json} ended"
+			echo
+			if [ -s "$file" ]; then
+				said=$(json_field "$file" result)
+				# Stopped by the spending limit, for one, it says nothing.
+				[ "$said" != unknown ] || said="It stopped without a last message ($(json_field "$file" subtype))."
+				echo "$said"
+			else
+				echo "Claude didn't get as far as answering:"
+				echo
+				echo '```'
+				tail -n 20 "${file%.json}.err" 2>/dev/null
+				echo '```'
+			fi
+			echo
+		done
 	} > "$OUT/summary.md"
 	say "The summary is in $OUT/summary.md"
 }

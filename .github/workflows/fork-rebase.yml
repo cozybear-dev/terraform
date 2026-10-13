@@ -64,6 +64,7 @@ jobs:
     timeout-minutes: 300
     outputs:
       from: ${{ steps.plan.outputs.from }}
+      from_head: ${{ steps.plan.outputs.from_head }}
       branch: ${{ steps.plan.outputs.branch }}
     steps:
       - name: Get this workflow's scripts
@@ -92,7 +93,11 @@ jobs:
           if [ -z "$FROM" ]; then
             FROM=$(git ls-remote --heads "$repo" 'refs/heads/perf/v*' | awk '{ sub("refs/heads/", "", $2); print $2 }' | python3 control/rebase/newest.py)
           fi
-          if ! [[ $FROM =~ ^perf/v[0-9A-Za-z.-]+$ ]] || ! git ls-remote --exit-code --heads "$repo" "refs/heads/$FROM" > /dev/null; then
+          from_head=""
+          if [[ $FROM =~ ^perf/v[0-9A-Za-z.-]+$ ]]; then
+            from_head=$(git ls-remote --heads "$repo" "refs/heads/$FROM" | cut -f1)
+          fi
+          if [ -z "$from_head" ]; then
             echo "::error::There is no branch of the fork called $FROM."
             exit 1
           fi
@@ -100,16 +105,22 @@ jobs:
             echo "::error::The branch $branch already exists. A published branch isn't replaced. If it's a failed attempt that nothing was published from, delete it and start again."
             exit 1
           fi
-          echo "Moving $FROM to upstream $TARGET${branch:+, as $branch}"
+          echo "Moving $FROM (at $from_head) to upstream $TARGET${branch:+, as $branch}"
           {
             echo "from=$FROM"
+            echo "from_head=$from_head"
             echo "branch=$branch"
           } >> "$GITHUB_OUTPUT"
 
       - name: Get the fork's branch
         env:
           FROM: ${{ steps.plan.outputs.from }}
-        run: git clone --quiet --single-branch --no-tags --branch "$FROM" "https://github.com/${GITHUB_REPOSITORY}.git" work
+          FROM_HEAD: ${{ steps.plan.outputs.from_head }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --single-branch --no-tags --branch "$FROM" "https://github.com/${GITHUB_REPOSITORY}.git" work
+          # What is moved is the branch as it was when this started.
+          git -C work reset --quiet --hard "$FROM_HEAD"
 
       - name: Replay the fork's commits onto the target
         env:
@@ -162,6 +173,7 @@ jobs:
             !${{ runner.temp }}/out/proof/**
             ${{ runner.temp }}/out/proof/differences/**
             !${{ runner.temp }}/out/upstream-tree/**
+            !${{ runner.temp }}/out/scratch/**
 
   push:
     name: Verify and push
@@ -171,6 +183,7 @@ jobs:
     env:
       TARGET: ${{ inputs.target }}
       FROM: ${{ needs.rebase.outputs.from }}
+      FROM_HEAD: ${{ needs.rebase.outputs.from_head }}
       BRANCH: ${{ needs.rebase.outputs.branch }}
     steps:
       # The scripts as they are on this branch, and never as anything in the
@@ -195,6 +208,12 @@ jobs:
           set -euo pipefail
           git clone --quiet --single-branch --no-tags --branch "$FROM" "https://github.com/${GITHUB_REPOSITORY}.git" work
           cd work
+          # Something pushed to the branch while this ran isn't in the
+          # result, and a new branch without it would lose it silently.
+          if [ "$(git rev-parse HEAD)" != "$FROM_HEAD" ]; then
+            echo "::error::The branch $FROM has changed since this run started, so the result doesn't have everything that's on it. Nothing was pushed. Run the workflow again."
+            exit 1
+          fi
           if [[ $TARGET =~ ^[0-9a-f]{40}$ ]]; then
             git fetch --quiet --no-tags "$UPSTREAM_URL" "$TARGET"
             new=$TARGET

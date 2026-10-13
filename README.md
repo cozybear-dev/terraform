@@ -25,9 +25,10 @@ When upstream releases a version that you want the fork on:
 2. Press **Run workflow**, type upstream's tag, for example `v1.17.0`, and
    press the green button.
 
-That's all there is to starting it. About an hour later, if it worked, there
-is a new branch `perf/v1.17.0` and, about half an hour after that, an image
-`ghcr.io/cozybear-dev/terraform:perf-v1.17.0`. The run's summary page says
+That's all there is to starting it. About half an hour later, if it worked,
+there is a new branch `perf/v1.17.0` and, about half an hour after that, an
+image `ghcr.io/cozybear-dev/terraform:perf-v1.17.0`. It takes longer, an
+hour or two, when something needs judgement. The run's summary page says
 what happened in between.
 
 Tick **Trial run** to have it do everything except push, which is the way to
@@ -88,6 +89,7 @@ The summary page of the run says which of these it was.
 | Stopped after three rounds of Claude's work | It couldn't get the checks to pass. The summary has its notes and the artifact has the logs. Run it again with a higher limit, or finish it by hand (see below). |
 | The guard rejected it | The move needs a change that only a person makes, such as adding a file to `fork-proof/FORK_FILES`. The log says which. Make the change on the fork's current branch and run it again. |
 | The branch already exists | There has already been a move to that tag. If nothing was published from it, delete the branch and run it again. |
+| The branch has changed since this run started | Something was pushed to the fork's branch while the move was running, and the result doesn't have it. Run it again. |
 | Pushed, and then **Fork image** failed | The branch is there and no image was published. Push a fix to that branch, which runs the checks again, or delete the branch and run this again. |
 
 ### What it needs

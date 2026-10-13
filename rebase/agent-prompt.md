@@ -39,7 +39,7 @@ Start by looking at the state of the repository (`git status`, `git log --onelin
 
 **Changes after the replay is finished** go in as amendments of the patch they belong to: `git commit --fixup=<that patch's commit>`. The script folds them in. Don't rewrite history yourself beyond continuing or skipping during the replay.
 
-**Run things.** Build and test as you go rather than reasoning about whether it compiles. The machine has several cores; `go test` on one package is quick.
+**Run things.** Build and test as you go rather than reasoning about whether it compiles. The machine has several cores; `go test` on one package is quick. Anything you need to keep on disk for a while, such as a second checkout or the working directory of a run of the proof, goes under `$OUT/scratch`, not in the repository and not in `/tmp`, which can be memory.
 
 ## What you must not change
 
