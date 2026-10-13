@@ -497,6 +497,9 @@ func (b *Local) opApply(
 
 	// Store the final state
 	runningOp.State = applyState
+	// The hook might still be writing an intermediate snapshot, which must
+	// not be allowed to replace the final state we're about to write.
+	stateHook.Wait()
 	logging.Phase("apply: complete")
 	err := statemgr.WriteAndPersist(opState, applyState, schemas)
 	logging.Phase("write state")
