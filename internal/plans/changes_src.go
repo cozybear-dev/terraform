@@ -4,6 +4,7 @@
 package plans
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/zclconf/go-cty/cty"
@@ -11,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/genconfig"
 	"github.com/hashicorp/terraform/internal/lang/marks"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/schemarepo"
 	"github.com/hashicorp/terraform/internal/states"
@@ -84,6 +86,30 @@ func (c *ChangesSrc) ResourceInstance(addr addrs.AbsResourceInstance) *ResourceI
 	return nil
 }
 
+// ResourceInstanceLookup returns a function that is equivalent to the
+// ResourceInstance method but is efficient to call many times, because it
+// uses an index of the changes that is built once here rather than scanning
+// all of the changes on every call.
+//
+// The returned function describes the changes as they are when
+// ResourceInstanceLookup is called, and so it won't notice any changes that
+// are added afterwards.
+func (c *ChangesSrc) ResourceInstanceLookup() func(addrs.AbsResourceInstance) *ResourceInstanceChangeSrc {
+	current := make(map[string]*ResourceInstanceChangeSrc, len(c.Resources))
+	for _, rc := range c.Resources {
+		if rc.DeposedKey != states.NotDeposed {
+			continue
+		}
+		key := rc.Addr.String()
+		if _, exists := current[key]; !exists {
+			current[key] = rc
+		}
+	}
+	return func(addr addrs.AbsResourceInstance) *ResourceInstanceChangeSrc {
+		return current[addr.String()]
+	}
+}
+
 // ResourceInstanceDeposed returns the plan change of a deposed object of
 // the resource instance of the given address, if any. Returns nil if no change
 // is planned.
@@ -112,12 +138,37 @@ func (c *ChangesSrc) OutputValue(addr addrs.AbsOutputValue) *OutputChangeSrc {
 
 // Decode decodes all the stored resource and output changes into a new *Changes value.
 func (c *ChangesSrc) Decode(schemas *schemarepo.Schemas) (*Changes, error) {
+	return c.decode(schemas, false)
+}
+
+// DecodeDeferringNoOps is like Decode except that it doesn't decode the
+// values of resource instance changes whose action is NoOp, which in a plan
+// for a large configuration are typically almost all of the changes and are
+// rarely needed afterwards.
+//
+// The result is only for use through [Changes.SyncWrapper], because the
+// methods of [ChangesSync] decode the deferred values of any change before
+// returning it. If decoding one fails then the values are left unknown, and
+// the error is reported by [ChangesSync.DecodeErrors].
+func (c *ChangesSrc) DecodeDeferringNoOps(schemas *schemarepo.Schemas) (*Changes, error) {
+	return c.decode(schemas, true)
+}
+
+func (c *ChangesSrc) decode(schemas *schemarepo.Schemas, deferNoOps bool) (*Changes, error) {
 	changes := NewChanges()
 
+	// Decoding each change is independent of all of the others and can be
+	// a significant amount of work for a plan with many resource instances,
+	// so we find the schemas first and then decode the changes concurrently.
+	// The result must still be as if we'd dealt with the changes one at a
+	// time, including reporting only the first problem.
+	resourceSchemas := make([]providers.Schema, 0, len(c.Resources))
+	var schemaErr error
 	for _, rcs := range c.Resources {
 		p, ok := schemas.Providers[rcs.ProviderAddr.Provider]
 		if !ok {
-			return nil, fmt.Errorf("ChangesSrc.Decode: missing provider %s for %s", rcs.ProviderAddr, rcs.Addr)
+			schemaErr = fmt.Errorf("ChangesSrc.Decode: missing provider %s for %s", rcs.ProviderAddr, rcs.Addr)
+			break
 		}
 
 		var schema providers.Schema
@@ -131,19 +182,56 @@ func (c *ChangesSrc) Decode(schemas *schemarepo.Schemas) (*Changes, error) {
 		}
 
 		if schema.Body == nil {
-			return nil, fmt.Errorf("ChangesSrc.Decode: missing schema for %s", rcs.Addr)
+			schemaErr = fmt.Errorf("ChangesSrc.Decode: missing schema for %s", rcs.Addr)
+			break
 		}
+		resourceSchemas = append(resourceSchemas, schema)
+	}
 
-		rc, err := rcs.Decode(schema)
+	decoded := make([]*ResourceInstanceChange, len(resourceSchemas))
+	decodeErrs := make([]error, len(resourceSchemas))
+	parallel.For(len(resourceSchemas), 16, func(i int) {
+		rcs := c.Resources[i]
+		if deferNoOps && rcs.Action == NoOp && rcs.Importing == nil {
+			prevRunAddr := rcs.PrevRunAddr
+			if prevRunAddr.Resource.Resource.Type == "" {
+				prevRunAddr = rcs.Addr
+			}
+			decoded[i] = &ResourceInstanceChange{
+				Addr:         rcs.Addr,
+				PrevRunAddr:  prevRunAddr,
+				DeposedKey:   rcs.DeposedKey,
+				ProviderAddr: rcs.ProviderAddr,
+				Change: Change{
+					Action:          rcs.Action,
+					GeneratedConfig: rcs.GeneratedConfig,
+				},
+				ActionReason:    rcs.ActionReason,
+				RequiredReplace: rcs.RequiredReplace,
+				Private:         rcs.Private,
+				DeferredValues:  &DeferredChangeValues{src: rcs, schema: resourceSchemas[i]},
+			}
+			return
+		}
+		rc, err := rcs.Decode(resourceSchemas[i])
 		if err != nil {
-			return nil, err
+			decodeErrs[i] = err
+			return
 		}
 
 		rc.Before = marks.MarkPaths(rc.Before, marks.Sensitive, rcs.BeforeSensitivePaths)
 		rc.After = marks.MarkPaths(rc.After, marks.Sensitive, rcs.AfterSensitivePaths)
-
-		changes.Resources = append(changes.Resources, rc)
+		decoded[i] = rc
+	})
+	for _, err := range decodeErrs {
+		if err != nil {
+			return nil, err
+		}
 	}
+	if schemaErr != nil {
+		return nil, schemaErr
+	}
+	changes.Resources = append(changes.Resources, decoded...)
 
 	for _, qis := range c.Queries {
 		p, ok := schemas.Providers[qis.ProviderAddr.Provider]
@@ -534,7 +622,13 @@ func (cs *ChangeSrc) Decode(schema *providers.Schema) (*Change, error) {
 			return nil, fmt.Errorf("error decoding 'beforeIdentity' value: %s", err)
 		}
 	}
-	if len(cs.After) > 0 {
+	switch {
+	case len(cs.After) > 0 && bytes.Equal(cs.After, cs.Before):
+		// The two values have the same serialization, as is always true
+		// for a no-op change, so they are the same value and we don't need
+		// to decode it again.
+		after = before
+	case len(cs.After) > 0:
 		after, err = cs.After.Decode(ty)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding 'after' value: %s", err)

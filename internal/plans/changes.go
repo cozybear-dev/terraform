@@ -6,12 +6,14 @@ package plans
 import (
 	"fmt"
 	"iter"
+	"sync"
 
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/genconfig"
 	"github.com/hashicorp/terraform/internal/lang/marks"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/schemarepo"
 	"github.com/hashicorp/terraform/internal/states"
@@ -52,10 +54,18 @@ func (c *Changes) Encode(schemas *schemarepo.Schemas) (*ChangesSrc, error) {
 	// a valid changesSrc.
 	changesSrc := NewChangesSrc()
 
+	// Encoding each change is independent of all of the others and can be
+	// a significant amount of work for a plan with many resource instances,
+	// so we find the schemas first and then encode the changes concurrently.
+	// The result must still be as if we'd dealt with the changes one at a
+	// time, including stopping at the first one that has a problem.
+	resourceSchemas := make([]providers.Schema, 0, len(c.Resources))
+	var schemaErr error
 	for _, rc := range c.Resources {
 		p, ok := schemas.Providers[rc.ProviderAddr.Provider]
 		if !ok {
-			return changesSrc, fmt.Errorf("Changes.Encode: missing provider %s for %s", rc.ProviderAddr, rc.Addr)
+			schemaErr = fmt.Errorf("Changes.Encode: missing provider %s for %s", rc.ProviderAddr, rc.Addr)
+			break
 		}
 
 		var schema providers.Schema
@@ -71,14 +81,25 @@ func (c *Changes) Encode(schemas *schemarepo.Schemas) (*ChangesSrc, error) {
 		}
 
 		if schema.Body == nil {
-			return changesSrc, fmt.Errorf("Changes.Encode: missing schema for %s", rc.Addr)
+			schemaErr = fmt.Errorf("Changes.Encode: missing schema for %s", rc.Addr)
+			break
 		}
-		rcs, err := rc.Encode(schema)
-		if err != nil {
+		resourceSchemas = append(resourceSchemas, schema)
+	}
+
+	encoded := make([]*ResourceInstanceChangeSrc, len(resourceSchemas))
+	encodeErrs := make([]error, len(resourceSchemas))
+	parallel.For(len(resourceSchemas), 16, func(i int) {
+		encoded[i], encodeErrs[i] = c.Resources[i].Encode(resourceSchemas[i])
+	})
+	for i, rcs := range encoded {
+		if err := encodeErrs[i]; err != nil {
 			return changesSrc, fmt.Errorf("Changes.Encode: %w", err)
 		}
-
 		changesSrc.Resources = append(changesSrc.Resources, rcs)
+	}
+	if schemaErr != nil {
+		return changesSrc, schemaErr
 	}
 
 	for _, qi := range c.Queries {
@@ -392,6 +413,11 @@ type ResourceInstanceChange struct {
 	// Terraform that relates to this change. Terraform will save this
 	// byte-for-byte and return it to the provider in the apply call.
 	Private []byte
+
+	// DeferredValues is non-nil if the values in the embedded Change were
+	// left to be decoded only once something needs them, in which case
+	// they must not be read directly. See [ChangesSrc.DecodeDeferringNoOps].
+	DeferredValues *DeferredChangeValues
 }
 
 // Encode produces a variant of the receiver that has its change values
@@ -752,8 +778,16 @@ func (c *Change) Encode(schema *providers.Schema) (*ChangeSrc, error) {
 	// We don't accept any other marks here. The caller should have dealt
 	// with those somehow and replaced them with unmarked placeholders before
 	// writing the value into the state.
-	unmarkedBefore, marksesBefore := c.Before.UnmarkDeepWithPaths()
-	unmarkedAfter, marksesAfter := c.After.UnmarkDeepWithPaths()
+	// Removing marks means building a whole new value, so we skip it for
+	// a value that doesn't have any, which is the common case.
+	unmarkedBefore, unmarkedAfter := c.Before, c.After
+	var marksesBefore, marksesAfter []cty.PathValueMarks
+	if marks.ContainsMarked(c.Before) {
+		unmarkedBefore, marksesBefore = c.Before.UnmarkDeepWithPaths()
+	}
+	if marks.ContainsMarked(c.After) {
+		unmarkedAfter, marksesAfter = c.After.UnmarkDeepWithPaths()
+	}
 	sensitiveAttrsBefore, unsupportedMarksesBefore := marks.PathsWithMark(marksesBefore, marks.Sensitive)
 	sensitiveAttrsAfter, unsupportedMarksesAfter := marks.PathsWithMark(marksesAfter, marks.Sensitive)
 
@@ -784,9 +818,16 @@ func (c *Change) Encode(schema *providers.Schema) (*ChangeSrc, error) {
 	if err != nil {
 		return nil, err
 	}
-	afterDV, err := NewDynamicValue(unmarkedAfter, ty)
-	if err != nil {
-		return nil, err
+	// Most of the changes in a plan for a large configuration are typically
+	// no-ops, where the two values are exactly the same. In that case we
+	// serialize the value only once and use the result for both, which
+	// saves both time and memory. The serialized values are never modified.
+	afterDV := beforeDV
+	if c.Action != NoOp || !unmarkedBefore.RawEquals(unmarkedAfter) {
+		afterDV, err = NewDynamicValue(unmarkedAfter, ty)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var beforeIdentityDV DynamicValue
@@ -821,4 +862,43 @@ func (c *Change) Encode(schema *providers.Schema) (*ChangeSrc, error) {
 		Importing:            c.Importing.Encode(identityTy),
 		GeneratedConfig:      c.GeneratedConfig,
 	}, nil
+}
+
+// DeferredChangeValues describes the serialized values of a resource instance
+// change whose decoding has been deferred until something needs them.
+// It has no exported fields because only this package can make use of it.
+type DeferredChangeValues struct {
+	once   sync.Once
+	src    *ResourceInstanceChangeSrc
+	schema providers.Schema
+	err    error
+}
+
+// decodeValues makes sure that the values in the change have been decoded,
+// returning an error if that isn't possible, in which case the values are
+// left as unknown values of unknown type. It's safe to call this concurrently,
+// and anything that reads the values after it returns will see the same
+// result.
+func (rc *ResourceInstanceChange) decodeValues() error {
+	pending := rc.DeferredValues
+	if pending == nil {
+		return nil
+	}
+	pending.once.Do(func() {
+		decoded, err := pending.src.Decode(pending.schema)
+		if err != nil {
+			pending.err = fmt.Errorf("failed to decode planned change for %s: %w", rc.Addr, err)
+			rc.Change.Before = cty.DynamicVal
+			rc.Change.After = cty.DynamicVal
+			return
+		}
+		decoded.Before = marks.MarkPaths(decoded.Before, marks.Sensitive, pending.src.BeforeSensitivePaths)
+		decoded.After = marks.MarkPaths(decoded.After, marks.Sensitive, pending.src.AfterSensitivePaths)
+		// Everything else about the change was recorded when decoding it
+		// was deferred, and the action can be read without waiting for
+		// this, so we assign only the values.
+		rc.Change.Before, rc.Change.After = decoded.Before, decoded.After
+		rc.Change.BeforeIdentity, rc.Change.AfterIdentity = decoded.BeforeIdentity, decoded.AfterIdentity
+	})
+	return pending.err
 }
