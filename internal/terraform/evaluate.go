@@ -6,6 +6,7 @@ package terraform
 import (
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -19,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/namedvals"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/plans/deferring"
 	"github.com/hashicorp/terraform/internal/providers"
@@ -83,6 +85,11 @@ type Evaluator struct {
 	FunctionResults *lang.FunctionResults
 
 	PlanTimestamp time.Time
+
+	// resourceValues remembers the values that GetResource has built for
+	// resources, as a map from the string representation of
+	// addrs.AbsResource to *resourceValueCacheEntry.
+	resourceValues sync.Map
 }
 
 // Scope creates an evaluation scope for the given module path and optional
@@ -743,6 +750,105 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 		// continue with the rest of the function
 	}
 
+	// Building the value of a resource means visiting every one of its
+	// instances, and during a graph walk we're typically asked for the value
+	// of the same resource many times: at least once for each object that
+	// refers to it. The value depends only on the resource's instances in
+	// the state, the planned changes for it, and its deferred instances, so
+	// as long as none of those have changed since we last built the value
+	// we can use that result again.
+	absAddr := addr.Absolute(d.ModulePath)
+	configAddr := addr.InModule(moduleConfig.Path)
+	cacheKey := absAddr.String()
+	// We must capture the generations before we read anything, so that if
+	// something changes while we're building the value then we'll just
+	// build it again next time.
+	generation := resourceValueGeneration{
+		state:   d.Evaluator.State.ResourceGeneration(absAddr),
+		changes: d.Evaluator.Changes.ConfigResourceGeneration(configAddr),
+	}
+	// Deferred instances are rare, so we don't track changes to them and
+	// instead just don't remember values for a resource that has any.
+	cacheable := len(d.Evaluator.Deferrals.GetDeferredResourceInstances(absAddr)) == 0
+	if !cacheable {
+		ret, moreDiags := d.buildResourceValue(addr, moduleConfig, config, schema, ty)
+		return ret, diags.Append(moreDiags)
+	}
+
+	// Many objects typically refer to the same resource at about the same
+	// time, such as all of the instances of another resource, so if the
+	// value we need is already being built then we wait for that rather
+	// than also building it. Building it takes the locks on the state and
+	// on the changes repeatedly, and so doing that from many goroutines at
+	// once holds up everything else.
+	var entry *resourceValueCacheEntry
+	for entry == nil {
+		cached, loaded := d.Evaluator.resourceValues.Load(cacheKey)
+		if loaded {
+			if cached := cached.(*resourceValueCacheEntry); cached.generation == generation {
+				<-cached.ready
+				if cached.ok {
+					return cached.value, diags
+				}
+				// Whoever built it encountered problems, which we need to
+				// report ourselves too, so we build it again.
+				ret, moreDiags := d.buildResourceValue(addr, moduleConfig, config, schema, ty)
+				return ret, diags.Append(moreDiags)
+			}
+		}
+		mine := &resourceValueCacheEntry{generation: generation, ready: make(chan struct{})}
+		if loaded {
+			if d.Evaluator.resourceValues.CompareAndSwap(cacheKey, cached, mine) {
+				entry = mine
+			}
+		} else if _, raced := d.Evaluator.resourceValues.LoadOrStore(cacheKey, mine); !raced {
+			entry = mine
+		}
+		// Otherwise something else got in first, so we look again.
+	}
+
+	// Anything waiting for this must always be released, even if building
+	// the value panics.
+	defer func() {
+		if !entry.ok {
+			d.Evaluator.resourceValues.CompareAndDelete(cacheKey, entry)
+		}
+		close(entry.ready)
+	}()
+	ret, moreDiags := d.buildResourceValue(addr, moduleConfig, config, schema, ty)
+	diags = diags.Append(moreDiags)
+	if len(moreDiags) == 0 {
+		entry.value = ret
+		entry.ok = true
+	}
+	return ret, diags
+}
+
+// resourceValueGeneration identifies the versions of the data that the value
+// of a resource was built from. See [evaluationStateData.GetResource].
+type resourceValueGeneration struct {
+	state   uint64
+	changes uint64
+}
+
+// resourceValueCacheEntry is a value of a resource that was built, or is
+// being built, from the data identified by generation.
+type resourceValueCacheEntry struct {
+	generation resourceValueGeneration
+
+	// ready is closed once the value has been built, after which ok is
+	// true if value is usable. It isn't if there were any diagnostics.
+	ready chan struct{}
+	value cty.Value
+	ok    bool
+}
+
+// buildResourceValue is the main implementation of GetResource for managed
+// and data resources, building a value that represents all of the instances
+// of the resource.
+func (d *evaluationStateData) buildResourceValue(addr addrs.Resource, moduleConfig *configs.Config, config *configs.Resource, schema providers.Schema, ty cty.Type) (cty.Value, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+
 	// Now, we're going to build up a value that represents the resource
 	// or resources that are in the state.
 	instances := map[addrs.InstanceKey]cty.Value{}
@@ -758,13 +864,75 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 	// does GetResourceInstanceChange have to iterate over all instances
 	// internally causing an n^2 lookup, but Changes is also a major point of
 	// lock contention.
-	resChanges := d.Evaluator.Changes.GetChangesForConfigResource(addr.InModule(moduleConfig.Path))
-	instChanges := addrs.MakeMap[addrs.AbsResourceInstance, *plans.ResourceInstanceChange]()
+	//
+	// We only need the action planned for each instance here, apart from
+	// for the instances whose objects are still only planned, so we don't
+	// ask for the changes themselves. That avoids copying all of them, and
+	// avoids decoding the values of changes that nothing else needs.
+	resChanges := d.Evaluator.Changes.GetChangeActionsForConfigResource(addr.InModule(moduleConfig.Path))
+	instChanges := make(map[addrs.InstanceKey]plans.Action, len(resChanges))
 	for _, ch := range resChanges {
-		instChanges.Put(ch.Addr, ch)
+		// The changes are for all instances of the module, but we want only
+		// those in the module instance we're evaluating in.
+		if ch.Addr.Module.Equal(d.ModulePath) {
+			instChanges[ch.Addr.Resource.Key] = ch.Action
+		}
 	}
 
 	rs := d.Evaluator.State.Resource(addr.Absolute(d.ModulePath))
+
+	// Decoding an object that nothing has decoded yet means parsing its
+	// serialized attributes, which is relatively expensive. If there are
+	// many of those, as when a resource with many instances is referenced
+	// for the first time by something that isn't changing it, then we
+	// decode them concurrently before assembling the result below.
+	type decodeResult struct {
+		obj *states.ResourceInstanceObject
+		err error
+	}
+	var predecoded map[addrs.InstanceKey]decodeResult
+	if rs != nil {
+		var pending []addrs.InstanceKey
+		for key, is := range rs.Instances {
+			if is != nil && is.Current != nil && is.Current.Status != states.ObjectPlanned && !is.Current.HasDecodedValue() {
+				pending = append(pending, key)
+			}
+		}
+		if len(pending) >= 8 {
+			results := make([]decodeResult, len(pending))
+			parallel.For(len(pending), 2, func(i int) {
+				obj, err := rs.Instances[pending[i]].Current.Decode(schema)
+				results[i] = decodeResult{obj, err}
+			})
+			predecoded = make(map[addrs.InstanceKey]decodeResult, len(pending))
+			for i, key := range pending {
+				predecoded[key] = results[i]
+			}
+		}
+	}
+
+	// Planned objects are temporarily stored in state with incomplete
+	// values, which need to be replaced by the planned values below. We
+	// fetch all of those changes together, rather than one at a time.
+	var plannedChanges map[addrs.InstanceKey]*plans.ResourceInstanceChange
+	if rs != nil {
+		var plannedAddrs []addrs.AbsResourceInstance
+		for key, is := range rs.Instances {
+			if is == nil || is.Current == nil || is.Current.Status != states.ObjectPlanned {
+				continue
+			}
+			if _, hasChange := instChanges[key]; hasChange {
+				plannedAddrs = append(plannedAddrs, addr.Instance(key).Absolute(d.ModulePath))
+			}
+		}
+		if len(plannedAddrs) != 0 {
+			plannedChanges = make(map[addrs.InstanceKey]*plans.ResourceInstanceChange, len(plannedAddrs))
+			for i, change := range d.Evaluator.Changes.GetCurrentResourceInstanceChanges(plannedAddrs) {
+				plannedChanges[plannedAddrs[i].Resource.Key] = change
+			}
+		}
+	}
+
 	// Decode all instances in the current state
 	pendingDestroy := d.Operation == walkDestroy
 	if rs != nil {
@@ -783,13 +951,13 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 			}
 
 			instAddr := addr.Instance(key).Absolute(d.ModulePath)
-			change := instChanges.Get(instAddr)
-			if change != nil {
+			action, hasChange := instChanges[key]
+			if hasChange {
 				// Don't take any resources that are yet to be deleted into account.
 				// If the referenced resource is CreateBeforeDestroy, then orphaned
 				// instances will be in the state, as they are not destroyed until
 				// after their dependants are updated.
-				if change.Action == plans.Delete {
+				if action == plans.Delete {
 					if !pendingDestroy {
 						continue
 					}
@@ -799,6 +967,7 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 			// Planned resources are temporarily stored in state with empty values,
 			// and need to be replaced by the planned value here.
 			if is.Current.Status == states.ObjectPlanned {
+				change := plannedChanges[key]
 				if change == nil {
 					// FIXME: This is usually an unfortunate case where we need to
 					// lookup an individual instance referenced via "self" for
@@ -814,7 +983,13 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 				continue
 			}
 
-			ios, err := is.Current.Decode(schema)
+			var ios *states.ResourceInstanceObject
+			var err error
+			if result, ok := predecoded[key]; ok {
+				ios, err = result.obj, result.err
+			} else {
+				ios, err = is.Current.Decode(schema)
+			}
 			if err != nil {
 				// This shouldn't happen, since by the time we get here we
 				// should have upgraded the state data already.
@@ -825,6 +1000,13 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 					Subject:  &config.DeclRange,
 				})
 				continue
+			}
+
+			if !is.Current.HasDecodedValue() {
+				// Decoding is relatively expensive, and we'll typically
+				// need the value of this object again each time something
+				// else refers to this resource, so we'll keep the result.
+				d.Evaluator.State.RememberDecodedResourceInstanceObject(instAddr, addrs.NotDeposed, is.Current, ios)
 			}
 
 			val := ios.Value
