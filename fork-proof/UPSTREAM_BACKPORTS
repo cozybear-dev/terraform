@@ -11,4 +11,16 @@
 # report. Take a line out when UPSTREAM_REF moves to a version that has it.
 #
 # Adding a line is a decision for a person. See proposals/workflows.
+#
+# The comment directly above a line says why it's there, and goes when the
+# line does. Keep a blank line between this heading and the first of them.
+
+# Upstream 1.17 lacks this, and without it what upstream says about module
+# instances whose expansion isn't known yet depends on the order in which Go
+# iterates over a map: the proof found upstream disagreeing with itself on
+# 1,143 of 4,000 generated inputs. It only has an effect when a module's
+# count or for_each is unknown and deferral is allowed, which only a build
+# with experimental features enabled allows. The fork remembers that answer
+# where upstream works it out afresh each time, so on 1.17 as released the
+# two can't be compared. It's on upstream's main and not on its v1.17 branch.
 3c8cba7d994e3f9e759d8852ac7414ef611d0953  copy the module path for each partial-expanded module instance
