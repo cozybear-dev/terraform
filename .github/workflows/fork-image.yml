@@ -27,7 +27,6 @@ name: Fork image
 on:
   push:
     branches:
-      - perf/large-state
       - 'perf/v*'
     tags:
       - 'v*-perf.*'

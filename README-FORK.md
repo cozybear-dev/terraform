@@ -59,30 +59,29 @@ gh attestation verify oci://ghcr.io/cozybear-dev/terraform@<digest> --repo cozyb
 
 | Tag | Meaning |
 |---|---|
-| `ghcr.io/cozybear-dev/terraform:<branch>` | Latest build of a branch, with `/` written as `-`: `perf-v1.17.0-rc1`, `perf-large-state` |
+| `ghcr.io/cozybear-dev/terraform:<branch>` | Latest build of a branch, with `/` written as `-`: `perf-v1.17.0-rc1` |
 | `ghcr.io/cozybear-dev/terraform:<branch>-<commit>` | One specific commit (first 12 characters of its hash) |
 
-The examples below use `perf-large-state`. Use the tag of the branch you
-want from [Branches and versions](#branches-and-versions).
+The branches are listed in [Branches and versions](#branches-and-versions).
 
 The image is laid out like the official `hashicorp/terraform` image: Alpine
 with `git` and an SSH client, and `/bin/terraform` as the entrypoint. It can
 stand in for that image.
 
 ```sh
-docker run --rm ghcr.io/cozybear-dev/terraform:perf-large-state version
+docker run --rm ghcr.io/cozybear-dev/terraform:perf-v1.17.0-rc1 version
 
 docker run --rm -it \
   -v "$PWD":/workspace -w /workspace \
   -v "$HOME/.config/gcloud":/root/.config/gcloud:ro \
-  ghcr.io/cozybear-dev/terraform:perf-large-state plan -out=tfplan
+  ghcr.io/cozybear-dev/terraform:perf-v1.17.0-rc1 plan -out=tfplan
 ```
 
 The binary is statically linked, so it can also be copied out of the image
 and run directly on any Linux machine of the same architecture:
 
 ```sh
-id=$(docker create ghcr.io/cozybear-dev/terraform:perf-large-state)
+id=$(docker create ghcr.io/cozybear-dev/terraform:perf-v1.17.0-rc1)
 docker cp "$id":/bin/terraform ./terraform-fork && docker rm "$id"
 ```
 
@@ -100,8 +99,7 @@ docker buildx build -f Dockerfile.fork --platform linux/amd64,linux/arm64 .
 
 | Branch | Upstream it's based on | `terraform version` says | Image tag |
 |---|---|---|---|
-| `perf/v1.17.0-rc1` | the release candidate `v1.17.0-rc1` | `Terraform v1.17.0-rc1` | `perf-v1.17.0-rc1` |
-| `perf/large-state` | `main` at `0828b3d2d7cb` | `Terraform v1.18.0-dev` | `perf-large-state` |
+| `perf/v1.17.0-rc1` | the release candidate `v1.17.0-rc1`, with [one later fix of upstream's](#fixes-of-upstreams-that-a-version-lacks) | `Terraform v1.17.0-rc1` | `perf-v1.17.0-rc1` |
 
 In an image, the line after the version says which commit of the fork was
 built and which upstream commit it's on. The upstream commit of a branch is
@@ -112,12 +110,17 @@ in `fork-proof/UPSTREAM_REF`.
   in. A branch like this is never moved: each version of upstream that the
   fork is carried to gets a branch of its own, named for it, so the next is
   `perf/v1.17.0` when upstream releases that.
-- **`perf/large-state`** is where the work was done, on upstream's
-  development branch as it was at the time, with the history of how it was
-  arrived at. It has the same changes, and isn't moved forward.
-- **There is no branch for 1.16.** The fork's graph patches are written for
-  the graph package as upstream rewrote it for 1.17, and 1.16 has the
-  earlier one, whose walker also does things that later versions dropped.
+- **`perf/large-state` is retired.** It is where the work was done, on
+  upstream's development branch as it was at the time (`main` at
+  `0828b3d2d7cb`, which calls itself `1.18.0-dev`), and it's kept for the
+  history of how the changes were arrived at. Nothing is published from it
+  any more. Its last image, `perf-large-state-f507e5f186b0`, has the same
+  changes as `perf/v1.17.0-rc1` had when that was first published, on a
+  different upstream.
+- **There is no branch for 1.16**, and none is planned. The fork's graph
+  patches are written for the graph package as upstream rewrote it for
+  1.17, and 1.16 has the earlier one, whose walker also does things that
+  later versions dropped.
   The first six patches apply to `v1.16.5` as they are. The two for the
   graph package don't, and would have to be written again for it; the
   patches after those weren't tried.
@@ -788,9 +791,8 @@ Limits of what was tested:
   `go test -fuzz` in each package). The graph changes are compared with
   upstream on generated graphs by `fork-proof`, and aren't fuzzed with
   coverage guidance.
-- `perf/v1.17.0-rc1` is based on a release candidate of upstream's, and
-  `perf/large-state` on its development branch. Neither is a final release.
-  There is no branch for 1.16.
+- `perf/v1.17.0-rc1` is based on a release candidate of upstream's, not on
+  a final release. There is no branch for 1.16.
 
 Known and not fixed:
 
@@ -835,7 +837,7 @@ In the container, mount a directory for the profiles and point
 ```sh
 docker run --rm -it -v "$PWD":/workspace -w /workspace \
   -v /tmp/tfprof-plan:/prof -e TF_PROFILE_PHASES=1 -e TF_PROFILE_DIR=/prof \
-  ghcr.io/cozybear-dev/terraform:perf-large-state plan -out=tfplan 2> plan-phases.txt
+  ghcr.io/cozybear-dev/terraform:perf-v1.17.0-rc1 plan -out=tfplan 2> plan-phases.txt
 ```
 
 ## Where the changes are
@@ -856,10 +858,10 @@ docker run --rm -it -v "$PWD":/workspace -w /workspace \
 | Benchmark provider | `internal/provider-bench` |
 | This document, the image and its workflow | `README-FORK.md`, `Dockerfile.fork`, `.github/workflows/fork-image.yml` |
 
-The branches for versions of upstream have one commit for each area, listed
-in [How the fork is maintained](#how-the-fork-is-maintained). On
-`perf/large-state`, `git log 0828b3d2d7cb..perf/large-state` has the steps
-in the order they were taken.
+A branch for a version of upstream has one commit for each area, listed in
+[How the fork is maintained](#how-the-fork-is-maintained). On the retired
+branch `perf/large-state`, `git log 0828b3d2d7cb..perf/large-state` has the
+steps in the order they were taken.
 
 ### Use of `unsafe`
 
@@ -938,9 +940,11 @@ each of those 32 variants. They have to pass for whatever is published,
 and they run for every push.
 
 A change to the fork belongs in the patch for its area. Make it as a commit
-on top, and fold it into that patch before the branch is published
-(`git commit --fixup`, then `git rebase --autosquash`), so that the stack
-stays one commit for each area.
+on top that names the patch it belongs to (`git commit --fixup=<patch>`).
+On a branch that hasn't been published yet, fold it in straight away
+(`git rebase --autosquash`). On one that has, it stays on top, because a
+published branch isn't rewritten, and is folded in when the stack next
+moves, so that each new branch starts as one commit for each area.
 
 ### Moving to a newer version of upstream
 
@@ -951,7 +955,7 @@ own, named for it, and a branch is never moved once it's published.
 git fetch https://github.com/hashicorp/terraform --tags
 old="$(cat fork-proof/UPSTREAM_REF)"
 git switch -c perf/v1.17.0 perf/v1.17.0-rc1
-git rebase --onto v1.17.0 "$old"          # resolve what conflicts, patch by patch
+git rebase --autosquash --onto v1.17.0 "$old"   # folds in what was added on top; resolve what conflicts, patch by patch
 git rev-parse 'v1.17.0^{commit}' > fork-proof/UPSTREAM_REF
 git commit --amend --no-edit fork-proof/UPSTREAM_REF   # the last patch is the proof
 
@@ -959,6 +963,11 @@ for dir in $(go list -m -f '{{.Dir}}' github.com/hashicorp/terraform/...); do (c
 (cd fork-proof && go test . && go run .)
 git push origin perf/v1.17.0              # the workflow runs the same checks, then publishes
 ```
+
+That needs git 2.44 or later, for `--autosquash` without an editor. A fix
+of upstream's that the old branch carried and the new version includes
+drops out of the rebase by itself, and its line has to come out of
+`fork-proof/UPSTREAM_BACKPORTS`.
 
 Where upstream has changed code that a patch replaces, the replacement has
 to be derived again from upstream's new code, not kept as it was: a patch
