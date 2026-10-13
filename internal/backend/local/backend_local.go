@@ -105,6 +105,10 @@ func (b *Local) localRun(ctx context.Context, op *backendrun.Operation) (*backen
 			stateMeta = &m
 		}
 		log.Printf("[TRACE] backend/local: populating backendrun.LocalRun from plan file")
+		// The state snapshots in the plan file are normally derived from
+		// the snapshot we've just loaded, so they can share its data
+		// rather than each holding a separate copy.
+		lp.ShareStateDataFrom(s.State())
 		ret, configSnap, ctxDiags = b.localRunForPlanFile(op, lp, ret, &coreOpts, stateMeta)
 		if ctxDiags.HasErrors() {
 			diags = diags.Append(ctxDiags)
