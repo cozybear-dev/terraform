@@ -332,7 +332,7 @@ timed, and should take under an hour.
 To check a published image rather than a build from source:
 
 ```sh
-id=$(docker create ghcr.io/cozybear-dev/terraform:perf-large-state-<commit>)
+id=$(docker create ghcr.io/cozybear-dev/terraform:<branch>-<commit>)
 docker cp "$id":/bin/terraform ./terraform-from-image && docker rm "$id"
 go run . -fork-ref <commit> -fork-bin ./terraform-from-image
 ```
