@@ -151,6 +151,8 @@ time and peak memory. State is in a local file unless stated.
 | Plan of a change to that configuration (432 updates) | 23.5 s | 0.8 s |
 | Plan with `-refresh=false`, the same configuration with 1,000 module calls: 4,000 module instances, 21,000 instances, 208 MB state | not run | 25 s, 2.0 GB |
 | The same with `TF_SKIP_VALIDATE=1` | | 18 s |
+| `show -no-color` of a saved plan, 30,000 instances on the real Vault and Google providers in 5,000 module calls, each with a module directory of its own (on GitHub's runners) | 21.5 s | 7.7 s (10.9 s before patch 33) |
+| `show -no-color` of a saved plan, 56,000 instances on the real Vault and Google providers in 100 module calls (on GitHub's runners) | 20.3 s | 1.3 s |
 
 Notes:
 
@@ -173,6 +175,13 @@ What is left in the fork's plan numbers is almost entirely the graph walk,
 and during the walk the workers are waiting for the providers. On the Vault
 and Google run, about 9 of the 10 default workers are inside a provider call
 at any moment, and at `-parallelism=100` about 98 of 100.
+
+The `show` rows were measured by the **Fork benchmark** workflow on the
+repository's default branch, on GitHub's 4-CPU linux/amd64 runners. A
+module call whose source is a registry or a bucket gets a module directory
+of its own, and what `show` does with those grew with the square of their
+number until patch 33. In a configuration with many more of them than the
+benchmark has, that was most of a minute.
 
 These are synthetic workloads. They were built to resemble a real large
 state, but they are not one.
