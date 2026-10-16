@@ -43,7 +43,7 @@ func (l *Loader) AddRootModuleToSnapshot(snap *Snapshot, rootDir string) hcl.Dia
 // filesystem, such as values files. For those, either use a normal loader
 // (created by NewLoader) or use the configs.Parser API directly.
 func NewLoaderFromSnapshot(snap *Snapshot) *Loader {
-	fs := snapshotFS{snap}
+	fs := newSnapshotFS(snap)
 	parser := configs.NewParser(fs)
 
 	ret := &Loader{
@@ -201,10 +201,36 @@ func (l *Loader) addModuleToSnapshot(snap *Snapshot, key string, dir string, sou
 // configuration loader and parser as an implementation detail of creating
 // a loader from a snapshot.
 type snapshotFS struct {
-	snap *Snapshot
+	// dirs finds the module of the snapshot whose directory is the given
+	// one, after filepath.Clean. Open used to look through every module of
+	// the snapshot, cleaning each one's directory, for every file it opened,
+	// which for a configuration of thousands of modules was most of the
+	// time taken to load it. The snapshot isn't changed once a loader has
+	// been made from it, so this is built once, by newSnapshotFS.
+	dirs map[string]*SnapshotModule
 }
 
 var _ afero.Fs = snapshotFS{}
+
+// newSnapshotFS returns a filesystem that reads from the given snapshot.
+func newSnapshotFS(snap *Snapshot) snapshotFS {
+	// Two modules can have the same directory: a local module that more
+	// than one module call uses is recorded once for each call, with the
+	// same files. Open used to take whichever of them it came to first,
+	// in the order in which Go happens to iterate over the map. This
+	// takes the one with the first key, which is one of those, and the
+	// same one every time.
+	keys := slices.Sorted(maps.Keys(snap.Modules))
+	dirs := make(map[string]*SnapshotModule, len(keys))
+	for _, key := range keys {
+		candidate := snap.Modules[key]
+		dir := filepath.Clean(candidate.Dir)
+		if _, exists := dirs[dir]; !exists {
+			dirs[dir] = candidate
+		}
+	}
+	return snapshotFS{dirs: dirs}
+}
 
 func (fs snapshotFS) Create(name string) (afero.File, error) {
 	return nil, fmt.Errorf("cannot create file inside configuration snapshot")
@@ -241,32 +267,22 @@ func (fs snapshotFS) Open(name string) (afero.File, error) {
 	directDir := filepath.Clean(name)
 
 	// First we'll check to see if this is an exact path for a module directory.
-	// We need to do this first (rather than as part of the next loop below)
+	// We need to do this first (rather than as part of the next lookup below)
 	// because a module in a child directory of another module can otherwise
 	// appear to be a file in that parent directory.
-	for _, candidate := range fs.snap.Modules {
-		modDir := filepath.Clean(candidate.Dir)
-		if modDir == directDir {
-			// We've matched the module directory itself
-			filenames := slices.Sorted(maps.Keys(candidate.Files))
-			return &snapshotDir{
-				filenames: filenames,
-			}, nil
-		}
+	if candidate, ok := fs.dirs[directDir]; ok {
+		// We've matched the module directory itself
+		filenames := slices.Sorted(maps.Keys(candidate.Files))
+		return &snapshotDir{
+			filenames: filenames,
+		}, nil
 	}
 
 	// If we get here then the given path isn't a module directory exactly, so
 	// we'll treat it as a file path and try to find a module directory it
 	// could be located in.
-	var modSnap *SnapshotModule
-	for _, candidate := range fs.snap.Modules {
-		modDir := filepath.Clean(candidate.Dir)
-		if modDir == dir {
-			modSnap = candidate
-			break
-		}
-	}
-	if modSnap == nil {
+	modSnap, ok := fs.dirs[dir]
+	if !ok {
 		return nil, os.ErrNotExist
 	}
 
