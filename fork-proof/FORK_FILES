@@ -39,6 +39,8 @@ internal/command/jsonformat/plan.go
 internal/command/jsonplan/plan.go
 internal/command/jsonplan/values.go
 internal/command/meta_policy.go
+internal/configs/configload/loader_snapshot.go
+internal/configs/configload/loader_snapshot_fork_test.go
 internal/configs/configschema/implied_type.go
 internal/dag/dag.go
 internal/dag/dag_fork_test.go
