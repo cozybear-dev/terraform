@@ -155,3 +155,6 @@ check the workflow makes before it pushes.
 | `rebase/agent-prompt.md` | What Claude is told |
 | `rebase/guard.sh` | Decides whether a result may be pushed |
 | `rebase/newest.py` | Finds the fork's newest branch |
+| `.github/workflows/fork-bench.yml` | **Fork benchmark**: times `terraform show` on a branch of the fork and on its upstream, on generated Vault and Google configurations, and checks they print the same |
+| `bench/show.sh` | What it runs |
+| `bench/gen4.py`, `bench/gcpmock.py` | The configurations it generates, and the stand-in for Google's APIs that their objects are created in |
