@@ -8,7 +8,9 @@
 # FORK and UPSTREAM are terraform binaries. In the current directory, which
 # should be empty, it generates a configuration with gen4.py: MODULES calls
 # of a module with PER_MODULE instances of each of its resources, using the
-# Vault and Google providers. It creates the objects, in a Vault dev server
+# Vault and Google providers, and with COPIES=1 a module directory of its
+# own for each call, as modules from a registry or a bucket have. It
+# creates the objects, in a Vault dev server
 # on 127.0.0.1:8200 and the Google API mock on 127.0.0.1:8766, which have to
 # be running, and saves two plans: "one", which changes a single resource,
 # and "many", which changes a label of every Pub/Sub topic. Then it shows
@@ -61,7 +63,7 @@ keep_tail apply
 say "Saving the plans"
 timed plan-one "$fork" plan -refresh=false -input=false -no-color -var bump=1 -out=one.tfplan
 keep_tail plan-one
-sed -i 's/tier   = "bench"/tier   = "bench2"/' modules/app/main.tf
+sed -i 's/tier   = "bench"/tier   = "bench2"/' modules/*/main.tf
 timed plan-many "$fork" plan -refresh=false -input=false -no-color -out=many.tfplan
 keep_tail plan-many
 ls -l terraform.tfstate one.tfplan many.tfplan | awk '{ print $5, $9 }' > "$out/sizes.txt"

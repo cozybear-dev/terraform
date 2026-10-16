@@ -5,6 +5,10 @@ Vault resources talk to a local Vault dev server; Google resources talk to
 gcpmock.py through the provider's custom endpoints.
 
 usage: gen4.py OUTDIR MODULES PER_MODULE
+
+With COPIES=1 in the environment, each module call has a module directory
+of its own, as modules from a registry or a bucket do once installed,
+rather than all of them sharing one local module.
 """
 import os, random, sys
 out, modules, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -126,8 +130,10 @@ output "secrets" {
   value = length(vault_kv_secret_v2.s)
 }
 '''
-os.makedirs(os.path.join(out, "modules/app"), exist_ok=True)
-open(os.path.join(out, "modules/app/main.tf"), "w").write(APP)
+copies = os.environ.get("COPIES") == "1"
+for d in (["app_%03d" % i for i in range(modules)] if copies else ["app"]):
+    os.makedirs(os.path.join(out, "modules", d), exist_ok=True)
+    open(os.path.join(out, "modules", d, "main.tf"), "w").write(APP)
 root = ['''
 terraform {
   required_providers {
@@ -174,7 +180,7 @@ for i in range(modules):
     ups = "\n".join('    app_%03d = module.app_%03d.first' % (d, d) for d in deps)
     root.append('''
 module "app_%03d" {
-  source = "./modules/app"
+  source = "./modules/%s"
   name   = "app-%03d"
   n      = %d
   mount  = vault_mount.kv.path
@@ -182,6 +188,6 @@ module "app_%03d" {
 %s
   }
 }
-''' % (i, i, n, ups))
+''' % (i, "app_%03d" % i if copies else "app", i, n, ups))
 open(os.path.join(out, "main.tf"), "w").write("".join(root))
 print("modules=%d instances~=%d" % (modules, modules * (5 * n + n // 2 + max(1, n // 10)) + 2))
