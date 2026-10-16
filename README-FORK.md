@@ -328,6 +328,17 @@ rendering did work for every unchanged resource that is never shown.
   if something refers to them.
 - The human-readable plan is computed and rendered in parallel batches, and
   nothing is computed for no-op changes.
+- `terraform show` of a saved plan, and applying one, load the
+  configuration from the copy of it inside the plan file. Finding each file
+  in that copy meant looking through every module of the configuration, so
+  the time grew with the square of the number of modules, and a module
+  call whose source is a registry or a bucket has a module of its own. With
+  thousands of them that was most of the time `terraform show` took. A
+  table from each module's directory to the module, built once, replaces
+  the search. It gives the same answers. Where two modules have the same
+  directory, which is the case when module calls share a local module and
+  then they have the same files, it takes the one that comes first by name,
+  where upstream took whichever it came to first.
 
 ### Remote state in Google Cloud Storage
 
@@ -853,7 +864,7 @@ docker run --rm -it -v "$PWD":/workspace -w /workspace \
 | State in memory | `internal/states` |
 | State managers | `internal/states/statemgr`, `internal/states/remote`, `internal/backend/remote-state/gcs` |
 | Saving state during apply | `internal/backend/local` (`hook_state.go`) |
-| Plan files | `internal/plans`, `internal/plans/planfile` |
+| Plan files | `internal/plans`, `internal/plans/planfile`, `internal/configs/configload` (`loader_snapshot.go`) |
 | Module installation | `internal/getmodules`, `internal/initwd` |
 | Graph | `internal/dag`, `internal/terraform` (`transform_*.go`, `graph_builder.go`) |
 | Graph walk and evaluation | `internal/terraform`, `internal/lang` |
@@ -893,7 +904,7 @@ give the same answer whoever runs them.
 
 A branch for a version of upstream is that version, then any fixes of
 upstream's own that it lacks and the fork needs (see below), then one commit
-for each area of the fork, 32 of them. Each builds, and passes `go vet`,
+for each area of the fork, 33 of them. Each builds, and passes `go vet`,
 which compiles every test, on top of the ones before it.
 
 | | Patch | Can be left out on its own |
@@ -930,16 +941,18 @@ which compiles every test, on top of the ones before it.
 | 30 | Say in the output of "terraform version" which build of the fork this is | Yes |
 | 31 | Describe the fork, and publish a container image of it | Yes |
 | 32 | Add a proof, that others can repeat, that the fork does what upstream does | Yes |
+| 33 | Find files in the configuration saved in a plan without searching every module | Yes |
 
 "Can be left out on its own" means that with every other patch applied and
 that one not, the fork still builds and passes `go vet`. That was tried for
-each of the 32. It's what to do when upstream changes the code under a
+each of the first 32. The 33rd changes one file of upstream's, and adds the
+test of it, and nothing else uses what it adds. It's what to do when upstream changes the code under a
 patch in a way that can't be reconciled with confidence: the fork without
 one optimisation is still the fork, and a patch carried over wrongly is a
 fault. Patch 18 is the one deliberate difference in what's on disk while an
 apply runs (difference 1), and leaving it out gives upstream's behaviour
 there with everything else kept. The tests and the proof weren't run for
-each of those 32 variants. They have to pass for whatever is published,
+each of those variants. They have to pass for whatever is published,
 and they run for every push.
 
 A change to the fork belongs in the patch for its area. Make it as a commit
@@ -984,8 +997,8 @@ git push origin candidate:refs/heads/perf/v1.17.0
 What it does in git terms, for whoever has to do it without the script:
 `git rebase --interactive --autosquash --onto <new tag> <old upstream commit>`
 on a copy of the branch, then the new tag's commit goes into
-`fork-proof/UPSTREAM_REF`, as an amendment of the last patch, which is the
-one that adds the proof.
+`fork-proof/UPSTREAM_REF`, as an amendment of the patch that adds the
+proof.
 
 Where upstream has changed code that a patch replaces, the replacement has
 to be derived again from upstream's new code, not kept as it was: a patch
