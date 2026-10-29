@@ -91,7 +91,7 @@ jobs:
     outputs:
       builds: ${{ steps.parse.outputs.builds }}
       labels: ${{ steps.parse.outputs.labels }}
-      plans: ${{ steps.parse.outputs.plans }}
+      measure: ${{ steps.parse.outputs.measure }}
     steps:
       - id: parse
         env:
@@ -121,7 +121,11 @@ jobs:
               sys.exit("::error::plans are p50, p300 and p1500")
           print("builds=" + json.dumps(builds))
           print("labels=" + " ".join(labels))
-          print("plans=" + json.dumps(plans))
+          # Each job applies with at most four builds, so that a long list
+          # of slow builds still fits in a job's six hours.
+          chunks = [labels[i:i + 4] for i in range(0, len(labels), 4)]
+          print("measure=" + json.dumps([{"plan": p, "chunk": i + 1, "labels": " ".join(c)}
+                                         for p in plans for i, c in enumerate(chunks)]))
           PY
 
   build:
@@ -235,14 +239,14 @@ jobs:
           retention-days: 3
 
   measure:
-    name: Apply ${{ matrix.plan }}
+    name: Apply ${{ matrix.plan }} (${{ matrix.labels }})
     needs: [matrix, scenario]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        plan: ${{ fromJSON(needs.matrix.outputs.plans) }}
+        include: ${{ fromJSON(needs.matrix.outputs.measure) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -271,8 +275,9 @@ jobs:
 
       - name: Apply
         env:
-          LABELS: ${{ needs.matrix.outputs.labels }}
+          LABELS: ${{ matrix.labels }}
           PLANS: ${{ matrix.plan }}
+          CHUNK: ${{ matrix.chunk }}
           PARALLELISM: ${{ inputs.parallelism }}
           RUNS: ${{ inputs.runs }}
           MEM_GB: ${{ inputs.memory_gb }}
@@ -282,13 +287,13 @@ jobs:
           set -euo pipefail
           cat bin/lines-*.tsv > lines.tsv
           COUNT_BIN=$PWD/bin/terraform-planner LINES_TSV=$PWD/lines.tsv \
-            control/bench/apply.sh scenario bin "out-${PLANS}"
+            control/bench/apply.sh scenario bin "out-${PLANS}-${CHUNK}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: out-${{ matrix.plan }}
-          path: out-${{ matrix.plan }}/
+          name: out-${{ matrix.plan }}-${{ matrix.chunk }}
+          path: out-${{ matrix.plan }}-${{ matrix.chunk }}/
           retention-days: 14
 
   kill:
@@ -354,14 +359,21 @@ jobs:
         env:
           BUILDS: ${{ inputs.builds }}
           PLANNER: ${{ inputs.planner_ref }}
+          PLANS: ${{ inputs.plans }}
           SCALE: ${{ inputs.scale }}
           MEM_GB: ${{ inputs.memory_gb }}
           DELAY_MS: ${{ inputs.delay_ms }}
         run: |
           set -euo pipefail
           mkdir all
-          cat results/out-p*/times.tsv > all/times.tsv 2>/dev/null || true
-          cat results/out-p*/checks.tsv > all/checks.tsv 2>/dev/null || true
+          touch all/times.tsv all/checks.tsv
+          # In the order of the plans and of the builds, as given.
+          for plan in $PLANS; do
+            for dir in $(ls -dv results/out-"$plan"-* 2>/dev/null); do
+              cat "$dir/times.tsv" >> all/times.tsv 2>/dev/null || true
+              cat "$dir/checks.tsv" >> all/checks.tsv 2>/dev/null || true
+            done
+          done
           cat results/bin-*/lines-*.tsv > all/lines.tsv 2>/dev/null || true
           if [ -s all/times.tsv ]; then
             python3 -I control/bench/summary.py all all/lines.tsv
