@@ -4,6 +4,7 @@
 package planfile
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/globalref"
+	"github.com/hashicorp/terraform/internal/parallel"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/plans/planproto"
 	"github.com/hashicorp/terraform/internal/providers"
@@ -43,17 +45,55 @@ const (
 // a plan file, which is stored in a special file in the archive called
 // "tfplan".
 func readTfplan(r io.Reader) (*plans.Plan, error) {
+	rawPlan, err := readRawTfplan(r)
+	if err != nil {
+		return nil, err
+	}
+	return planFromRawTfplan(rawPlan)
+}
+
+// readRawTfplan reads and parses the content of the "tfplan" file from a
+// plan file, without interpreting it.
+func readRawTfplan(r io.Reader) (*planproto.Plan, error) {
 	src, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
 
-	var rawPlan planproto.Plan
-	err = proto.Unmarshal(src, &rawPlan)
+	rawPlan := &planproto.Plan{}
+	err = proto.Unmarshal(src, rawPlan)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %s", err)
 	}
+	return rawPlan, nil
+}
 
+// resourceChangesFromTfplan converts each of the given changes using
+// resourceChangeFromTfplan.
+//
+// A plan includes a change for every resource instance, whether or not
+// anything is changing, and each one is independent of the others, so for a
+// large plan we convert them concurrently. If any are invalid then the
+// error is the one for the first of those, as if they'd been converted in
+// order.
+func resourceChangesFromTfplan(rawChanges []*planproto.ResourceInstanceChange) ([]*plans.ResourceInstanceChangeSrc, error) {
+	changes := make([]*plans.ResourceInstanceChangeSrc, len(rawChanges))
+	errs := make([]error, len(rawChanges))
+	parallel.For(len(rawChanges), 64, func(i int) {
+		changes[i], errs[i] = resourceChangeFromTfplan(rawChanges[i], addrs.ParseAbsResourceInstanceStr)
+	})
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return changes, nil
+}
+
+// planFromRawTfplan produces a plan from the result of readRawTfplan, which
+// it doesn't modify. The serialized values in the result share memory with
+// the given message, and so with any other plan produced from it.
+func planFromRawTfplan(rawPlan *planproto.Plan) (*plans.Plan, error) {
 	if rawPlan.Version != tfplanFormatVersion {
 		return nil, fmt.Errorf("unsupported plan file format version %d; only version %d is supported", rawPlan.Version, tfplanFormatVersion)
 	}
@@ -77,6 +117,7 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 	plan.Complete = rawPlan.Complete
 	plan.Errored = rawPlan.Errored
 
+	var err error
 	plan.UIMode, err = planproto.FromMode(rawPlan.UiMode)
 	if err != nil {
 		return nil, err
@@ -105,25 +146,19 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 	}
 	plan.Checks = checkResults
 
-	for _, rawRC := range rawPlan.ResourceChanges {
-		change, err := resourceChangeFromTfplan(rawRC, addrs.ParseAbsResourceInstanceStr)
-		if err != nil {
-			// errors from resourceChangeFromTfplan already include context
-			return nil, err
-		}
-
-		plan.Changes.Resources = append(plan.Changes.Resources, change)
+	resourceChanges, err := resourceChangesFromTfplan(rawPlan.ResourceChanges)
+	if err != nil {
+		// errors from resourceChangeFromTfplan already include context
+		return nil, err
 	}
+	plan.Changes.Resources = append(plan.Changes.Resources, resourceChanges...)
 
-	for _, rawRC := range rawPlan.ResourceDrift {
-		change, err := resourceChangeFromTfplan(rawRC, addrs.ParseAbsResourceInstanceStr)
-		if err != nil {
-			// errors from resourceChangeFromTfplan already include context
-			return nil, err
-		}
-
-		plan.DriftedResources = append(plan.DriftedResources, change)
+	driftedResources, err := resourceChangesFromTfplan(rawPlan.ResourceDrift)
+	if err != nil {
+		// errors from resourceChangeFromTfplan already include context
+		return nil, err
 	}
+	plan.DriftedResources = append(plan.DriftedResources, driftedResources...)
 
 	for _, rawDC := range rawPlan.DeferredChanges {
 		change, err := deferredChangeFromTfplan(rawDC)
@@ -486,6 +521,11 @@ func changeFromTfplan(rawChange *planproto.Change) (*plans.ChangeSrc, error) {
 		}
 		if ret.After == nil {
 			return nil, fmt.Errorf("missing \"after\" value: %s", err)
+		}
+		if len(ret.After) != 0 && bytes.Equal(ret.After, ret.Before) {
+			// The two values are identical, as for a no-op change, so
+			// they can share memory rather than each having a copy.
+			ret.After = ret.Before
 		}
 	}
 
