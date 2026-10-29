@@ -3,9 +3,13 @@
 Terraform with the real google provider without a GCP project.
 
 Supports Pub/Sub topics and subscriptions, Secret Manager secrets and IAM
-service accounts. usage: gcpmock.py PORT
+service accounts. usage: gcpmock.py PORT [--load FILE]
+
+GET /_dump returns everything it holds, which --load reads back in, so that
+a benchmark can start each run from the same objects. GET /_count?prefix=P
+returns how many objects have names that start with P.
 """
-import json, re, sys, threading
+import argparse, json, re, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -36,6 +40,11 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         body = self.body() if method in ("PUT", "POST", "PATCH") else {}
         with lock:
+            if method == "GET" and path == "_dump":
+                return self.reply(200, store)
+            if method == "GET" and path == "_count":
+                prefix = q.get("prefix", [""])[0]
+                return self.reply(200, {"count": sum(1 for name in store if name.startswith(prefix))})
             # Secret Manager: POST projects/P/secrets?secretId=X
             m = re.fullmatch(r"(projects/[^/]+)/secrets", path)
             if m and method == "POST":
@@ -83,4 +92,11 @@ class H(BaseHTTPRequestHandler):
     def do_PATCH(self): self.handle_any("PATCH")
     def do_DELETE(self): self.handle_any("DELETE")
 
-ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+args = argparse.ArgumentParser()
+args.add_argument("port", type=int)
+args.add_argument("--load", help="start with the objects in this file, saved from /_dump")
+args = args.parse_args()
+if args.load:
+    with open(args.load) as f:
+        store.update(json.load(f))
+ThreadingHTTPServer(("127.0.0.1", args.port), H).serve_forever()

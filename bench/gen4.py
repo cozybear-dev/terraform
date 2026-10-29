@@ -9,9 +9,13 @@ usage: gen4.py OUTDIR MODULES PER_MODULE
 With COPIES=1 in the environment, each module call has a module directory
 of its own, as modules from a registry or a bucket do once installed,
 rather than all of them sharing one local module.
+
+With BLOB_KB=K, every Vault secret also holds the same K KiB of text, which
+makes the state larger without adding objects.
 """
-import os, random, sys
+import hashlib, os, random, sys
 out, modules, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+blob_kb = int(os.environ.get("BLOB_KB", "0"))
 random.seed(5)
 
 APP = r'''
@@ -29,7 +33,7 @@ variable "upstream" {
   type    = map(string)
   default = {}
 }
-
+%(blob_variable)s
 locals {
   keys = [for i in range(var.n) : format("k%03d", i)]
 }
@@ -112,7 +116,7 @@ resource "vault_kv_secret_v2" "s" {
     subscription = google_pubsub_subscription.s[each.key].id
     policy       = vault_policy.p[each.key].name
     iam          = data.google_iam_policy.p[0].policy_data
-    upstream     = var.upstream
+    upstream     = var.upstream%(blob_entry)s
   })
   custom_metadata {
     max_versions = 5
@@ -130,6 +134,15 @@ output "secrets" {
   value = length(vault_kv_secret_v2.s)
 }
 '''
+if blob_kb > 0:
+    APP = APP.replace("%(blob_variable)s", '''
+variable "blob" {
+  type    = string
+  default = ""
+}
+''').replace("%(blob_entry)s", "\n    blob         = var.blob")
+else:
+    APP = APP.replace("%(blob_variable)s", "").replace("%(blob_entry)s", "")
 copies = os.environ.get("COPIES") == "1"
 for d in (["app_%03d" % i for i in range(modules)] if copies else ["app"]):
     os.makedirs(os.path.join(out, "modules", d), exist_ok=True)
@@ -166,11 +179,18 @@ resource "vault_mount" "kv" {
   type = "kv-v2"
 }
 
-resource "vault_policy" "bump" {
+%(blob_local)sresource "vault_policy" "bump" {
   name   = "bench-bump"
   policy = "path \\"bench/data/bump-${var.bump}\\" { capabilities = [\\"read\\"] }"
 }
 ''']
+# The text is hex digits of a chain of digests, the same on every run.
+blob, h = "", b"tfperf"
+while len(blob) < blob_kb * 1024:
+    h = hashlib.sha256(h).digest()
+    blob += h.hex()
+blob_local = 'locals {\n  blob = "%s"\n}\n\n' % blob[:blob_kb * 1024] if blob_kb > 0 else ""
+root[0] = root[0].replace("%(blob_local)s", blob_local)
 layer = max(1, int(modules ** 0.5))
 for i in range(modules):
     deps = []
@@ -183,11 +203,11 @@ module "app_%03d" {
   source = "./modules/%s"
   name   = "app-%03d"
   n      = %d
-  mount  = vault_mount.kv.path
+  mount  = vault_mount.kv.path%s
   upstream = {
 %s
   }
 }
-''' % (i, "app_%03d" % i if copies else "app", i, n, ups))
+''' % (i, "app_%03d" % i if copies else "app", i, n, "\n  blob   = local.blob" if blob_kb > 0 else "", ups))
 open(os.path.join(out, "main.tf"), "w").write("".join(root))
 print("modules=%d instances~=%d" % (modules, modules * (5 * n + n // 2 + max(1, n // 10)) + 2))
