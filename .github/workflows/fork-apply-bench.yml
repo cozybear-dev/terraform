@@ -1,0 +1,387 @@
+---
+name: Fork apply benchmark
+run-name: "Benchmark apply: ${{ inputs.builds }}"
+
+# Measures "terraform apply PLANFILE" with any list of builds, for choosing
+# which of the fork's patches an apply needs (see
+# docs/superpowers/specs/2026-10-29-apply-branch-design.md).
+#
+# The plans are saved by a build of the full fork (planner_ref), against a
+# state of about 400 MB in a GCS emulator, for a generated configuration on
+# the Vault and Google providers, with a module directory for each module
+# call. Every build applies the same plan files from the same starting
+# point, under a memory limit with swap behind it, with Vault and the Google
+# mock answering about as slowly as real APIs do. The runs are on arm64, as
+# the published image is when it runs on an Apple machine.
+#
+# It publishes nothing. The table is on the run's summary page, and the raw
+# numbers are in its artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      builds:
+        description: "Builds to measure, as label=ref; a ref upstream:X is upstream's"
+        required: true
+        type: string
+        default: "stock=upstream:v1.17.0-rc1 full=perf/v1.17.0-rc1"
+      planner_ref:
+        description: "Build of the full fork that saves the plans"
+        required: false
+        type: string
+        default: perf/v1.17.0-rc1
+      scale:
+        description: "full (about 400 MB of state) or smoke (a few hundred objects, to try the workflow)"
+        required: false
+        type: choice
+        options: [full, smoke]
+        default: full
+      plans:
+        description: "Plans to apply: p50, p300, p1500"
+        required: false
+        type: string
+        default: "p50 p300 p1500"
+      parallelism:
+        description: "Values of -parallelism to apply with"
+        required: false
+        type: string
+        default: "10 100"
+      runs:
+        description: "Times each build applies each plan"
+        required: false
+        type: string
+        default: "2"
+      memory_gb:
+        description: "Memory limit of each apply, in GB"
+        required: false
+        type: string
+        default: "10"
+      delay_ms:
+        description: "Delay each way to and from Vault and the Google mock, in ms"
+        required: false
+        type: string
+        default: "50"
+      apply_timeout_min:
+        description: "Minutes after which an apply is stopped and recorded as a timeout"
+        required: false
+        type: string
+        default: "40"
+      kill_labels:
+        description: "Builds to stop part way with kill -9, SIGINT and SIGTERM (empty: none; needs a build labelled stock)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://github.com/hashicorp/terraform.git
+  # Upstream v1.17.0-rc1 with upstream 3c8cba7d99 cherry-picked, which every
+  # subset of the fork's patches starts from. Changed lines are counted
+  # from here.
+  BASE_COMMIT: 38bf979f34498a36dbfb2db2786c6ade988182fd
+  TF_IN_AUTOMATION: "1"
+  CHECKPOINT_DISABLE: "1"
+
+jobs:
+  matrix:
+    name: Read the inputs
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      builds: ${{ steps.parse.outputs.builds }}
+      labels: ${{ steps.parse.outputs.labels }}
+      plans: ${{ steps.parse.outputs.plans }}
+    steps:
+      - id: parse
+        env:
+          BUILDS: ${{ inputs.builds }}
+          PLANNER: ${{ inputs.planner_ref }}
+          PLANS: ${{ inputs.plans }}
+          KILL: ${{ inputs.kill_labels }}
+        run: |
+          python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+          builds, labels = [], []
+          for item in os.environ["BUILDS"].split():
+              label, _, ref = item.partition("=")
+              if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", label) or not ref or label == "planner" or label in labels:
+                  sys.exit("::error::%r isn't label=ref with a new label" % item)
+              upstream = ref.startswith("upstream:")
+              builds.append({"label": label, "ref": ref[len("upstream:"):] if upstream else ref, "upstream": upstream})
+              labels.append(label)
+          builds.append({"label": "planner", "ref": os.environ["PLANNER"], "upstream": False})
+          kill = os.environ["KILL"].split()
+          if kill and "stock" not in labels:
+              sys.exit("::error::the kill test reads states with a build labelled stock")
+          if any(k not in labels for k in kill):
+              sys.exit("::error::kill_labels names a build that isn't in builds")
+          plans = os.environ["PLANS"].split()
+          if not plans or any(p not in ("p50", "p300", "p1500") for p in plans):
+              sys.exit("::error::plans are p50, p300 and p1500")
+          print("builds=" + json.dumps(builds))
+          print("labels=" + " ".join(labels))
+          print("plans=" + json.dumps(plans))
+          PY
+
+  build:
+    name: Build ${{ matrix.build.label }}
+    needs: matrix
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.matrix.outputs.builds) }}
+    steps:
+      - name: Get the source
+        env:
+          REF: ${{ matrix.build.ref }}
+          UPSTREAM: ${{ matrix.build.upstream }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          [ "$UPSTREAM" = true ] && url=$UPSTREAM_URL
+          git init --quiet src
+          git -C src fetch --quiet --no-tags --depth=1 "$url" "$REF"
+          git -C src checkout --quiet FETCH_HEAD
+          echo "Building $(git -C src rev-parse HEAD)"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src/.go-version
+          cache: false
+
+      - name: Build
+        env:
+          LABEL: ${{ matrix.build.label }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # The same way for every build, so that they all report the same
+          # version and accept each other's plan files.
+          (cd src && go build -trimpath -o "../out/terraform-$LABEL" .)
+          "out/terraform-$LABEL" version
+
+      - name: Count the changed lines
+        env:
+          LABEL: ${{ matrix.build.label }}
+          UPSTREAM: ${{ matrix.build.upstream }}
+        run: |
+          set -euo pipefail
+          if [ "$UPSTREAM" = true ]; then
+            lines=0
+          else
+            git -C src fetch --quiet --no-tags --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "$BASE_COMMIT"
+            lines=$(git -C src diff --numstat "$BASE_COMMIT" HEAD -- . ':!*_test.go' ':!fork-proof' ':!*.md' \
+              ':!.github' ':!internal/provider-bench' ':!**/testdata/**' ':!Dockerfile*' |
+              awk '{ n += $1 + $2 } END { print n + 0 }')
+          fi
+          printf '%s\t%s\n' "$LABEL" "$lines" > "out/lines-$LABEL.tsv"
+          echo "$LABEL: $lines changed lines"
+
+      - name: Vet
+        if: ${{ !matrix.build.upstream && matrix.build.label != 'planner' }}
+        run: cd src && go vet ./internal/...
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bin-${{ matrix.build.label }}
+          path: out/
+          retention-days: 3
+
+  scenario:
+    name: Create the objects and save the plans
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bin-planner
+          path: bin
+
+      - name: Start Vault, the Google API mock and the GCS emulator
+        run: |
+          chmod +x bin/*
+          control/bench/services.sh start-mock
+
+      - name: Create the objects and save the plans
+        env:
+          SCALE: ${{ inputs.scale }}
+        run: |
+          set -euo pipefail
+          if [ "$SCALE" = smoke ]; then
+            export MODULES=20 PER_MODULE=5 BLOB_KB=0
+          else
+            export MODULES=1000 PER_MODULE=20 BLOB_KB=5
+          fi
+          control/bench/scenario.sh bin/terraform-planner scenario
+          # Each job that applies installs the providers again.
+          rm -rf scenario/work/.terraform
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scenario
+          path: scenario/
+          include-hidden-files: true
+          retention-days: 3
+
+  measure:
+    name: Apply ${{ matrix.plan }}
+    needs: [matrix, scenario]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        plan: ${{ fromJSON(needs.matrix.outputs.plans) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bin-*
+          path: bin
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: scenario
+          path: scenario
+
+      - name: Add swap, and check the memory limit and the delay
+        run: |
+          chmod +x bin/terraform-*
+          control/bench/services.sh swap 8
+          control/bench/selftest.sh
+
+      - name: Start Vault and the GCS emulator
+        run: control/bench/services.sh start
+
+      - name: Apply
+        env:
+          LABELS: ${{ needs.matrix.outputs.labels }}
+          PLANS: ${{ matrix.plan }}
+          PARALLELISM: ${{ inputs.parallelism }}
+          RUNS: ${{ inputs.runs }}
+          MEM_GB: ${{ inputs.memory_gb }}
+          DELAY_MS: ${{ inputs.delay_ms }}
+          APPLY_TIMEOUT_MIN: ${{ inputs.apply_timeout_min }}
+        run: |
+          set -euo pipefail
+          cat bin/lines-*.tsv > lines.tsv
+          COUNT_BIN=$PWD/bin/terraform-planner LINES_TSV=$PWD/lines.tsv \
+            control/bench/apply.sh scenario bin "out-${PLANS}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: out-${{ matrix.plan }}
+          path: out-${{ matrix.plan }}/
+          retention-days: 14
+
+  kill:
+    name: Stop applies part way
+    needs: [matrix, scenario]
+    if: ${{ inputs.kill_labels != '' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bin-*
+          path: bin
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: scenario
+          path: scenario
+
+      - name: Start Vault and the GCS emulator
+        run: |
+          chmod +x bin/terraform-*
+          control/bench/services.sh start
+
+      - name: Stop applies
+        env:
+          LABELS: ${{ inputs.kill_labels }}
+          DELAY_MS: ${{ inputs.delay_ms }}
+        run: |
+          # shellcheck disable=SC2086
+          control/bench/killtest.sh scenario bin out-kill $LABELS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: out-kill
+          path: out-kill/
+          retention-days: 14
+
+  report:
+    name: Report
+    needs: [matrix, build, measure, kill]
+    if: ${{ always() && needs.measure.result != 'skipped' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{out-*,bin-*}"
+          path: results
+
+      - name: Put the results together
+        env:
+          BUILDS: ${{ inputs.builds }}
+          PLANNER: ${{ inputs.planner_ref }}
+          SCALE: ${{ inputs.scale }}
+          MEM_GB: ${{ inputs.memory_gb }}
+          DELAY_MS: ${{ inputs.delay_ms }}
+        run: |
+          set -euo pipefail
+          mkdir all
+          cat results/out-p*/times.tsv > all/times.tsv 2>/dev/null || true
+          cat results/out-p*/checks.tsv > all/checks.tsv 2>/dev/null || true
+          cat results/bin-*/lines-*.tsv > all/lines.tsv 2>/dev/null || true
+          if [ -s all/times.tsv ]; then
+            python3 -I control/bench/summary.py all all/lines.tsv
+          else
+            echo "No apply finished." > all/summary.md
+          fi
+          {
+            echo "### terraform apply of saved plans"
+            echo
+            echo "Builds: \`$BUILDS\`. Plans saved by \`$PLANNER\`. Scale: $SCALE; memory limit $MEM_GB GB; $DELAY_MS ms each way to Vault and the Google mock."
+            echo
+            cat all/summary.md
+            if [ -f results/out-kill/kill.md ]; then
+              echo
+              echo "### Stopping applies part way"
+              echo
+              cat results/out-kill/kill.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: summary
+          path: all/
+          retention-days: 30

@@ -158,3 +158,8 @@ check the workflow makes before it pushes.
 | `.github/workflows/fork-bench.yml` | **Fork benchmark**: times `terraform show` on a branch of the fork and on its upstream, on generated Vault and Google configurations, and checks they print the same |
 | `bench/show.sh` | What it runs |
 | `bench/gen4.py`, `bench/gcpmock.py` | The configurations it generates, and the stand-in for Google's APIs that their objects are created in |
+| `.github/workflows/fork-apply-bench.yml` | **Fork apply benchmark**: times `terraform apply` of plans saved by the full fork, with any list of builds (`label=ref`, `upstream:` for upstream's), against a state of about 400 MB in a GCS emulator, under a memory limit, with Vault and the Google mock slowed to answer like real APIs; and, if asked, stops applies part way to see what the state in the bucket is missing. Start it with `gh workflow run "Fork apply benchmark" --ref fork -f builds="stock=upstream:v1.17.0-rc1 full=perf/v1.17.0-rc1"` |
+| `bench/scenario.sh`, `bench/apply.sh`, `bench/killtest.sh`, `bench/summary.py` | What it runs: the objects and plans, the applies, the stops, and the table |
+| `bench/mkchanges.py`, `bench/reset.sh`, `bench/limit.sh`, `bench/netem.sh`, `bench/services.sh`, `bench/selftest.sh` | Making a plan change a given number of resources, starting each apply from the same place, the memory limit, the delay, the services, and a check of the last two on the runner |
+| `bench/subset.sh` | Makes a branch of a subset of the fork's patches, to measure |
+| `bench/test_bench.py` | Tests of the Python parts: `python3 -I bench/test_bench.py` |
