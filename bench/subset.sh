@@ -6,9 +6,10 @@
 #
 # The branch dev/apply-LABEL starts at upstream v1.17.0-rc1 with upstream
 # 3c8cba7d99 cherry-picked (BASE), and gets patches N... of
-# origin/perf/v1.17.0-rc1 cherry-picked in the order of the stack. Patch N is
-# the Nth commit after BASE that isn't a fixup, as in the table in
-# README-FORK.md.
+# origin/perf/v1.17.0-rc1 cherry-picked in the order given. Patch N is the
+# Nth commit after BASE that isn't a fixup, as in the table in
+# README-FORK.md. Anything that isn't a number is taken as a commit, such as
+# a part of a patch made on a branch of its own.
 #
 # It runs in the git worktree WT (default ~/tfperf/stack/wt), with rerere on,
 # so that a conflict resolved by hand once is resolved the same way the next
@@ -32,8 +33,12 @@ mapfile -t patches < <(git log --reverse --format=%H --invert-grep --grep='^fixu
 [ "${#patches[@]}" -ge 33 ] || { echo "expected at least 33 patches, found ${#patches[@]}" >&2; exit 1; }
 
 git switch --quiet --discard-changes -C "dev/apply-$label" "$BASE"
-for n in $(printf '%s\n' "$@" | sort -n -u); do
-	commit=${patches[$((n - 1))]}
+for n in "$@"; do
+	if [[ $n =~ ^[0-9]+$ ]]; then
+		commit=${patches[$((n - 1))]}
+	else
+		commit=$(git rev-parse --verify "$n^{commit}")
+	fi
 	echo "patch $n: $(git log -1 --format=%s "$commit")"
 	if ! git "${ident[@]}" cherry-pick "$commit" > /dev/null 2>&1; then
 		if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
