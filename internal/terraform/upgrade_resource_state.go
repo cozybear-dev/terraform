@@ -11,6 +11,7 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/lang/ephemeral"
+	"github.com/hashicorp/terraform/internal/lang/fastjson"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -239,6 +240,12 @@ func upgradeResourceIdentity(addr addrs.AbsResourceInstance, provider providers.
 // stripRemovedStateAttributes deletes any attributes no longer present in the
 // schema, so that the json can be correctly decoded.
 func stripRemovedStateAttributes(state []byte, ty cty.Type) []byte {
+	// Almost always there's nothing to remove, and we can establish that
+	// far more cheaply than by decoding the whole object as we do below.
+	if fastjson.HasOnlySupportedAttributes(state, ty) {
+		return state
+	}
+
 	// we must use json.Number to avoid changing the precision of cty.Number values
 	decoder := json.NewDecoder(bytes.NewReader(state))
 	decoder.UseNumber()
