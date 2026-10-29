@@ -197,6 +197,9 @@ jobs:
   scenario:
     name: Create the objects and save the plans
     needs: build
+    # A build that doesn't compile is left out of the measurements; only the
+    # planner has to be there.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
@@ -241,6 +244,7 @@ jobs:
   measure:
     name: Apply ${{ matrix.plan }} (${{ matrix.labels }})
     needs: [matrix, scenario]
+    if: ${{ !cancelled() && needs.scenario.result == 'success' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     strategy:
@@ -299,7 +303,7 @@ jobs:
   kill:
     name: Stop applies part way
     needs: [matrix, scenario]
-    if: ${{ inputs.kill_labels != '' }}
+    if: ${{ !cancelled() && inputs.kill_labels != '' && needs.scenario.result == 'success' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:

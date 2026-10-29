@@ -35,6 +35,17 @@ bindir=$(cd "$2" && pwd)
 mkdir -p "$3/logs"
 out=$(cd "$3" && pwd)
 read -r -a labels <<< "${LABELS:-$(cd "$bindir" && ls terraform-* | sed 's/^terraform-//' | tr '\n' ' ')}"
+# A build that didn't compile has no binary, and is left out.
+built=()
+for label in "${labels[@]}"; do
+	if [ -x "$bindir/terraform-$label" ]; then
+		built+=("$label")
+	else
+		echo "There is no terraform-$label; it's left out." >&2
+	fi
+done
+labels=("${built[@]}")
+[ "${#labels[@]}" -gt 0 ] || { echo "apply.sh: no builds to measure" >&2; exit 1; }
 PLANS=${PLANS:-p50 p300 p1500}
 PARALLELISM=${PARALLELISM:-10 100}
 RUNS=${RUNS:-2}
