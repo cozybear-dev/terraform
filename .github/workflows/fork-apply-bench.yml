@@ -71,6 +71,11 @@ on:
         required: false
         type: string
         default: ""
+      measure_labels:
+        description: "Builds to apply the plans with (empty: all), to leave out one only needed by the kill test, such as stock"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -99,6 +104,7 @@ jobs:
           PLANNER: ${{ inputs.planner_ref }}
           PLANS: ${{ inputs.plans }}
           KILL: ${{ inputs.kill_labels }}
+          MEASURE: ${{ inputs.measure_labels }}
         run: |
           python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os, re, sys
@@ -116,6 +122,9 @@ jobs:
               sys.exit("::error::the kill test reads states with a build labelled stock")
           if any(k not in labels for k in kill):
               sys.exit("::error::kill_labels names a build that isn't in builds")
+          measured = os.environ["MEASURE"].split() or labels
+          if any(m not in labels for m in measured):
+              sys.exit("::error::measure_labels names a build that isn't in builds")
           plans = os.environ["PLANS"].split()
           if not plans or any(p not in ("p50", "p300", "p1500") for p in plans):
               sys.exit("::error::plans are p50, p300 and p1500")
@@ -123,7 +132,7 @@ jobs:
           print("labels=" + " ".join(labels))
           # Each job applies with at most four builds, so that a long list
           # of slow builds still fits in a job's six hours.
-          chunks = [labels[i:i + 4] for i in range(0, len(labels), 4)]
+          chunks = [measured[i:i + 4] for i in range(0, len(measured), 4)]
           print("measure=" + json.dumps([{"plan": p, "chunk": i + 1, "labels": " ".join(c)}
                                          for p in plans for i, c in enumerate(chunks)]))
           PY
