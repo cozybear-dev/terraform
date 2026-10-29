@@ -149,5 +149,41 @@ class TestBench(unittest.TestCase):
         self.assertLessEqual(abs(counts["create"] - 50), 50 * 0.25, counts)
 
 
+    def test_summary(self):
+        out = os.path.join(self.tmp, "out")
+        os.makedirs(out)
+        # label plan parallelism run wall user sys maxrss_kb mem_peak_mb swap_peak_mb oom_kills exit
+        rows = [
+            ("stock", "p300", 10, 1, 100, 90, 9, 9000000, 9500, 1200, 0, "0"),
+            ("x", "p300", 10, 1, 10, 9, 1, 2000000, 2100, 0, 0, "0"),
+            ("stock", "p300", 10, 2, 120, 95, 9, 9100000, 9600, 1500, 0, "0"),
+            ("x", "p300", 10, 2, 14, 9, 1, 2100000, 2200, 0, 0, "wrong-count"),
+        ]
+        with open(os.path.join(out, "times.tsv"), "w") as f:
+            for row in rows:
+                f.write("\t".join(str(v) for v in row) + "\n")
+        lines = os.path.join(self.tmp, "lines.tsv")
+        with open(lines, "w") as f:
+            f.write("stock\t0\nx\t45\n")
+        run(os.path.join(HERE, "summary.py"), out, lines)
+
+        with open(os.path.join(out, "summary.json")) as f:
+            summary = json.load(f)
+        self.assertEqual([r["label"] for r in summary["rows"]], ["stock", "x"])
+        stock, x = summary["rows"]
+        self.assertEqual((stock["lines"], x["lines"]), (0, 45))
+        self.assertEqual(stock["cells"]["p300/10"]["wall"], 110.0)
+        self.assertEqual(stock["cells"]["p300/10"]["mem_mb"], 11100)
+        self.assertEqual(stock["cells"]["p300/10"]["swap_mb"], 1500)
+        cell = x["cells"]["p300/10"]
+        self.assertEqual(cell["wall"], 12.0)
+        self.assertEqual(cell["wall_pct"], 10.9)
+        self.assertEqual(cell["mem_mb"], 2200)
+        self.assertEqual(cell["swap_mb"], 0)
+        self.assertIn("wrong-count", cell["problems"])
+        self.assertEqual(stock["cells"]["p300/10"]["problems"], [])
+        self.assertIn("| x | 45 |", read(os.path.join(out, "summary.md")))
+
+
 if __name__ == "__main__":
     unittest.main()
