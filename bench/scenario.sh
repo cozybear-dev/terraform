@@ -55,12 +55,19 @@ cd "$work"
 say "Installing the providers"
 "$planner" init -input=false -no-color > "$out/init.log"
 
-say "Creating the objects"
-"$planner" apply -auto-approve -input=false -no-color -parallelism=50 > "$out/create.log" 2>&1 || {
-	tail -n 40 "$out/create.log" >&2
-	exit 1
-}
-tail -n 5 "$out/create.log" >&2
+# Tens of thousands of requests to Vault through Docker's port forwarding
+# now and then lose one, so a failed apply is run again: it carries on from
+# the state in the bucket.
+for attempt in 1 2 3; do
+	say "Creating the objects (attempt $attempt)"
+	if "$planner" apply -auto-approve -input=false -no-color -parallelism=20 > "$out/create.log" 2>&1; then
+		break
+	fi
+	tail -n 15 "$out/create.log" >&2
+	docker logs --tail 20 vault >&2 2>&1 || true
+	[ "$attempt" -lt 3 ] || exit 1
+done
+tail -n 3 "$out/create.log" >&2
 curl -sf -o "$out/state.tfstate" "http://127.0.0.1:4443/storage/v1/b/tfperf-state/o/bench%2Fdefault.tfstate?alt=media"
 curl -sf -o "$out/mock.json" http://127.0.0.1:8766/_dump
 
