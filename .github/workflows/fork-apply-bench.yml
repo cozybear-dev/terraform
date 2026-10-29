@@ -217,7 +217,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$SCALE" = smoke ]; then
+            # The same plans, scaled down to what 20 small modules can give.
             export MODULES=20 PER_MODULE=5 BLOB_KB=0
+            export PLANS="p50:20:mixed p300:40:mixed p1500:60:mixed kill:60:create"
           else
             export MODULES=1000 PER_MODULE=20 BLOB_KB=5
           fi
