@@ -1,0 +1,144 @@
+---
+name: Fork integrity proof
+
+# Builds upstream Terraform at the commit pinned in fork-proof/UPSTREAM_REF
+# and this fork from source, has both do the same things, and fails if what
+# they produce differs. See fork-proof/README.md for what that establishes.
+#
+# It runs when asked to, and when another workflow calls it, which is how
+# the image workflow can refuse to publish a build that hasn't passed. It
+# isn't triggered by pushes or pull requests as it stands: see
+# fork-proof/README.md, "Making it a gate", for the triggers to add once the
+# branch is protected.
+#
+# This belongs to the fork, and never runs in the upstream repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: How many generated inputs and interruptions
+        type: choice
+        options: [ci, nightly]
+        default: ci
+  workflow_call:
+    inputs:
+      tier:
+        type: string
+        default: ci
+    outputs:
+      verdict:
+        description: identical, different or incomplete
+        value: ${{ jobs.proof.outputs.verdict }}
+      report-sha256:
+        description: Digest of the report
+        value: ${{ jobs.proof.outputs.report-sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: Compare with upstream
+    if: github.repository != 'hashicorp/terraform'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.tier == 'nightly' && 180 || 45 }}
+    permissions:
+      contents: read
+      # For attesting the report. Remove these two, and the last step, to
+      # run without attestation.
+      id-token: write
+      attestations: write
+    outputs:
+      verdict: ${{ steps.run.outputs.verdict }}
+      report-sha256: ${{ steps.run.outputs.report-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the pinned upstream commit
+        run: |
+          ref="$(cat fork-proof/UPSTREAM_REF)"
+          git fetch --no-tags --depth=1 https://github.com/hashicorp/terraform.git "$ref"
+          # The proof measures coverage of what the fork changed, which
+          # needs the fork's own commit in full too.
+          git cat-file -e "$ref^{commit}"
+          # And any later commits of upstream's that the fork carries, each
+          # with its parent, which is what it's a change from.
+          if [ -f fork-proof/UPSTREAM_BACKPORTS ]; then
+            grep -v '^#' fork-proof/UPSTREAM_BACKPORTS | awk 'NF { print $1 }' | while read -r commit; do
+              git fetch --no-tags --depth=2 https://github.com/hashicorp/terraform.git "$commit"
+            done
+          fi
+
+      # This build is for applying plans saved by the full fork, so the proof
+      # also applies plans saved by the full fork's latest commit, with this
+      # build and with upstream.
+      - name: Fetch the full fork, whose plans this build applies
+        run: |
+          git fetch --no-tags --depth=1 origin perf/v1.17.0-rc1
+          echo "PLANNER_COMMIT=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+
+      # The rules for what the comparison disregards have tests of their
+      # own, which say what each rule must not disregard.
+      - name: Test the proof itself
+        working-directory: fork-proof
+        run: go vet . && go test .
+
+      - name: Run the proof
+        id: run
+        working-directory: fork-proof
+        run: |
+          set +e
+          go run . -tier "${{ inputs.tier || 'ci' }}" -jobs 4 -planner-ref "$PLANNER_COMMIT" -report "$RUNNER_TEMP/report.json" | tee "$RUNNER_TEMP/summary.txt"
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "verdict=$(jq -r .verdict "$RUNNER_TEMP/report.json")"
+            echo "report-sha256=$(sha256sum "$RUNNER_TEMP/report.json" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### Fork integrity proof'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # The report and the summary are in one directory, so they are at the
+      # top of this artifact, which is where the image workflow looks for
+      # the report.
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fork-proof-report
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/summary.txt
+
+      - name: Keep what differed and what wasn't covered
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fork-proof-details
+          if-no-files-found: ignore
+          # The working directory's name begins with a dot.
+          include-hidden-files: true
+          path: |
+            fork-proof/.work/differences
+            fork-proof/.work/coverage/uncovered.txt
+
+      # Signs a statement that this workflow, at this commit, produced this
+      # report. Anyone can check it with
+      #   gh attestation verify report.json --repo <owner>/<repository>
+      - name: Attest the report
+        if: success()
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/report.json

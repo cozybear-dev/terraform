@@ -1,0 +1,13 @@
+{
+  "description": "Operations limited to part of the configuration: a first apply that targets one resource, which also creates what it depends on and nothing else; an apply of the rest; changes applied to one instance of a module only, leaving everything else needing them; one object replaced on request; and then everything.",
+  "covers": ["targeting", "expander", "resource-value-cache", "walker", "state-module-index", "plan-render"],
+  "steps": [
+    {"name": "create-targeted", "config": "v1", "op": "apply", "plan_args": ["-target=fp_thing.dependent"], "expect": ["Plan: 2 to add, 0 to change, 0 to destroy", "Resource targeting is in effect"]},
+    {"name": "create-rest", "op": "apply", "expect": ["Plan: 8 to add, 0 to change, 0 to destroy"]},
+    {"name": "change-one-module-instance", "config": "v2", "op": "apply", "plan_args": ["-target=module.cell[\"q\"]"], "expect": ["Plan: 0 to add, 2 to change, 0 to destroy"]},
+    {"name": "change-one-instance", "op": "apply", "plan_args": ["-target=fp_thing.bystander[1]"], "expect": ["Plan: 0 to add, 1 to change, 0 to destroy"]},
+    {"name": "replace-on-request", "op": "apply", "plan_args": ["-replace=fp_thing.bystander[2]", "-target=fp_thing.bystander[2]"], "expect": ["will be replaced, as requested"]},
+    {"name": "everything-else", "op": "apply", "expect": ["to change"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

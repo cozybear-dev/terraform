@@ -1,0 +1,60 @@
+diff --git a/internal/states/statefile/marshal_equal.go b/internal/states/statefile/marshal_equal.go
+index 51082c0eba..3752ff86ff 100644
+--- a/internal/states/statefile/marshal_equal.go
++++ b/internal/states/statefile/marshal_equal.go
+@@ -9,9 +9,6 @@ import (
+ 	"encoding/json"
+ 	"sync"
+ 
+-	"github.com/zclconf/go-cty/cty"
+-	ctyjson "github.com/zclconf/go-cty/cty/json"
+-
+ 	"github.com/hashicorp/terraform/internal/states"
+ )
+ 
+@@ -195,7 +192,7 @@ func StatesDefinitelyMarshalEqual(a, b *states.State) bool {
+ 		if aOV == nil || bOV == nil {
+ 			return false
+ 		}
+-		if aOV != bOV && (aOV.Sensitive != bOV.Sensitive || !aOV.Addr.Equal(bOV.Addr) || !outputValuesMarshalEqual(aOV.Value, bOV.Value)) {
++		if aOV != bOV && (aOV.Sensitive != bOV.Sensitive || !aOV.Addr.Equal(bOV.Addr) || !aOV.Value.RawEquals(bOV.Value)) {
+ 			return false
+ 		}
+ 	}
+@@ -236,36 +233,6 @@ func StatesDefinitelyMarshalEqual(a, b *states.State) bool {
+ 	return true
+ }
+ 
+-// outputValuesMarshalEqual returns true only if the two given output values
+-// are serialized identically.
+-//
+-// Being equal as values isn't enough for that. A number is written as the
+-// shortest decimal that identifies it at the precision it's held with, so
+-// the result of pow(2, 60), which is held as a 64-bit float, is written as
+-// 1152921504606847000, while the same number read back from a state file
+-// is written as 1152921504606846976. Types that are equal can be written
+-// differently too. So the two are compared as they'd be written. There are
+-// only as many output values as the root module declares.
+-func outputValuesMarshalEqual(a, b cty.Value) bool {
+-	if !a.RawEquals(b) {
+-		return false
+-	}
+-	aSrc, err := ctyjson.Marshal(a, a.Type())
+-	if err != nil {
+-		return false
+-	}
+-	bSrc, err := ctyjson.Marshal(b, b.Type())
+-	if err != nil || !bytes.Equal(aSrc, bSrc) {
+-		return false
+-	}
+-	aTypeSrc, err := ctyjson.MarshalType(a.Type())
+-	if err != nil {
+-		return false
+-	}
+-	bTypeSrc, err := ctyjson.MarshalType(b.Type())
+-	return err == nil && bytes.Equal(aTypeSrc, bTypeSrc)
+-}
+-
+ // instanceObjectsDefinitelyMarshalEqual returns true only if the two given
+ // objects, either of which can be nil, have exactly the same content.
+ func instanceObjectsDefinitelyMarshalEqual(a, b *states.ResourceInstanceObjectSrc) bool {

@@ -1,0 +1,17 @@
+{
+  "description": "The commands that read and rewrite the state directly rather than through a plan: listing and showing it, moving a resource, an instance and a module to other addresses, and removing an instance. After them the configuration is changed to match, and a plan must find nothing to do.",
+  "covers": ["state-read", "state-write", "state-manager-local", "state-module-index", "state-encode"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 5 to add, 0 to change, 0 to destroy"]},
+    {"name": "list", "op": "cmd", "args": ["state", "list"]},
+    {"name": "show-one", "op": "cmd", "args": ["state", "show", "-no-color", "fp_thing.one"]},
+    {"name": "show-all", "op": "cmd", "args": ["show", "-no-color"]},
+    {"name": "move-resource", "op": "cmd", "args": ["state", "mv", "fp_thing.one", "fp_thing.uno"]},
+    {"name": "move-module", "op": "cmd", "args": ["state", "mv", "module.box", "module.crate"]},
+    {"name": "remove-instance", "op": "cmd", "args": ["state", "rm", "fp_thing.several[0]"]},
+    {"name": "move-instance", "op": "cmd", "args": ["state", "mv", "fp_thing.several[2]", "fp_thing.several[0]"]},
+    {"name": "list-again", "op": "cmd", "args": ["state", "list"]},
+    {"name": "matches", "config": "v2", "op": "plan", "expect": ["No changes."]},
+    {"name": "pull", "op": "cmd", "args": ["output", "-json"]}
+  ]
+}

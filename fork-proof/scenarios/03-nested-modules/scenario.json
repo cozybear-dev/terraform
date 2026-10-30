@@ -1,0 +1,9 @@
+{
+  "description": "Modules nested two deep, the outer with for_each and the inner with count, passing objects down through variables and values back up through outputs, with a data source in the innermost; then a variable that reaches every resource changes and another module instance is added.",
+  "covers": ["module-expansion", "expander", "named-values", "output-index", "walker", "transitive-reduction", "resource-value-cache", "function-tables"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 6 to add, 0 to change, 0 to destroy"]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to add", "to change"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

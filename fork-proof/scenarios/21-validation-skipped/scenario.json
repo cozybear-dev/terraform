@@ -1,0 +1,11 @@
+{
+  "description": "The nested modules scenario again, with the fork told to skip validating the configuration before each operation (TF_SKIP_VALIDATE=1, which upstream doesn't have). For a configuration that's valid, what's planned, applied and saved must be what upstream plans, applies and saves. The provider receives fewer requests to validate resource configuration, because that is what the setting skips, so those requests alone are left out of the comparison of what the provider was asked to do.",
+  "covers": ["skip-validate", "module-expansion", "walker"],
+  "fork_env": {"TF_SKIP_VALIDATE": "1"},
+  "ignore_provider_ops": ["validate", "validate_data"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 6 to add, 0 to change, 0 to destroy"]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to add", "to change"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

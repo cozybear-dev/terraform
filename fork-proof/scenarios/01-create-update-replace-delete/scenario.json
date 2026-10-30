@@ -1,0 +1,9 @@
+{
+  "description": "The four basic actions on single resources with attributes of every kind: create, update in place, replace because an attribute that forces it changed, and delete because the resource left the configuration; then a plan that finds nothing to do.",
+  "covers": ["state-read", "state-write", "state-encode", "plan-file", "plan-render", "walker", "changes-index", "resource-value-cache", "attach-dependencies"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 3 to add, 0 to change, 0 to destroy", "Apply complete! Resources: 3 added, 0 changed, 0 destroyed"], "order": [["a", "b"]]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["Plan: 2 to add, 1 to change, 2 to destroy", "must be replaced"], "order": [["apply:a", "create:b-renamed"], ["create:b-renamed", "d"]]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

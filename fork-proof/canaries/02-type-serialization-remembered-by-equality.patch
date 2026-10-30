@@ -1,0 +1,51 @@
+diff --git a/internal/states/marshal_json.go b/internal/states/marshal_json.go
+index 25b6e19417..e07eb34df2 100644
+--- a/internal/states/marshal_json.go
++++ b/internal/states/marshal_json.go
+@@ -277,16 +277,6 @@ var recentTypes struct {
+ // recorded alongside a dynamically-typed value. The result must not be
+ // modified.
+ func dynamicTypeJSON(ty cty.Type) ([]byte, bool) {
+-	if hasEmptyTuple(ty) {
+-		// A tuple type with no elements is serialized as either
+-		// ["tuple",[]] or ["tuple",null], depending on how the type was
+-		// constructed, and the two are equal as types. Recognizing a type
+-		// by its being equal to an earlier one would give this one the
+-		// serialization of the other, so these are never remembered.
+-		src, err := ty.MarshalJSON()
+-		return src, err == nil
+-	}
+-
+ 	recentTypes.Lock()
+ 	for i := range recentTypes.entries {
+ 		if entry := &recentTypes.entries[i]; entry.json != nil && entry.ty.Equals(ty) {
+@@ -309,29 +299,3 @@ func dynamicTypeJSON(ty cty.Type) ([]byte, bool) {
+ 	recentTypes.Unlock()
+ 	return src, true
+ }
+-
+-// hasEmptyTuple returns true if the given type is, or contains, a tuple type
+-// with no elements.
+-func hasEmptyTuple(ty cty.Type) bool {
+-	switch {
+-	case ty.IsTupleType():
+-		etys := ty.TupleElementTypes()
+-		if len(etys) == 0 {
+-			return true
+-		}
+-		for _, ety := range etys {
+-			if hasEmptyTuple(ety) {
+-				return true
+-			}
+-		}
+-	case ty.IsCollectionType():
+-		return hasEmptyTuple(ty.ElementType())
+-	case ty.IsObjectType():
+-		for _, aty := range ty.AttributeTypes() {
+-			if hasEmptyTuple(aty) {
+-				return true
+-			}
+-		}
+-	}
+-	return false
+-}

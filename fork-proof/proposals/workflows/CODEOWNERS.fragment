@@ -1,0 +1,23 @@
+# PROPOSAL. To be added to CODEOWNERS on the fork's branch, with branch
+# protection requiring code owner review. These are the files that decide
+# what the integrity proof means. Whatever maintains the fork day to day,
+# a person approves changes to them.
+
+# The proof: its rules for what to disregard, its corpus, its provider and
+# its component driver. Removing a scenario, or adding a rule, weakens it.
+/fork-proof/                  @cozybear-dev
+
+# The upstream commit that the fork is compared with, and the later commits
+# of upstream's that are applied to it first.
+/fork-proof/UPSTREAM_REF      @cozybear-dev
+/fork-proof/UPSTREAM_BACKPORTS @cozybear-dev
+
+# The list of files the fork is allowed to differ from upstream in.
+/fork-proof/FORK_FILES        @cozybear-dev
+
+# The workflows that run the proof and publish images.
+/.github/                     @cozybear-dev
+/Dockerfile.fork              @cozybear-dev
+
+# What the fork tells people it does differently.
+/README-FORK.md               @cozybear-dev

@@ -1,0 +1,10 @@
+{
+  "description": "A configuration written in the JSON syntax, whose expressions are a different kind of object in memory from those of the native syntax; two configurations of the same provider, one passed into a module under another name; and built-in functions that read files and render templates, whose tables of functions the fork shares between the scopes of a module.",
+  "covers": ["for-each-cache", "function-tables", "module-expansion", "walker", "resource-value-cache", "plan-render"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 10 to add, 0 to change, 0 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to change"]},
+    {"name": "nothing-to-do-again", "op": "plan", "expect": ["No changes."]}
+  ]
+}

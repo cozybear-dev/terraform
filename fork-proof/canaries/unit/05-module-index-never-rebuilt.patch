@@ -1,0 +1,27 @@
+diff --git a/internal/states/sync.go b/internal/states/sync.go
+index 7f3905d721..eac752012f 100644
+--- a/internal/states/sync.go
++++ b/internal/states/sync.go
+@@ -743,7 +743,6 @@ func (s *SyncState) beginWrite() func() {
+ 	// Callers of this function can modify anything in the state.
+ 	s.generation++
+ 	s.allGeneration = s.generation
+-	s.moduleSetGeneration++
+ 	return unlock
+ }
+ 
+@@ -766,12 +765,8 @@ func (s *SyncState) beginResourceWrite(addr addrs.AbsResource) func() {
+ // changes how many there are.
+ func (s *SyncState) noteModuleSetChange(unlock func()) func() {
+ 	before := len(s.state.Modules)
+-	return func() {
+-		if len(s.state.Modules) != before {
+-			s.moduleSetGeneration++
+-		}
+-		unlock()
+-	}
++	_ = before
++	return unlock
+ }
+ 
+ // beginOutputWrite is like beginWrite but for a caller that will modify only

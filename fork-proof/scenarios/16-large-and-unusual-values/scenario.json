@@ -1,0 +1,11 @@
+{
+  "description": "Values chosen to be awkward to serialize: a string of about 300 kB, strings with quotes, backslashes, control characters, characters that JSON encoders escape for the benefit of HTML, line and paragraph separators, combining characters and text outside the basic plane; numbers that are fractions, that don't fit in 64 bits, and that are at the limits of what a float can hold exactly; dynamically-typed values of every shape including empty and deeply nested ones; and collections with over a thousand elements. The state is large enough to be read and written in parts. Then the large string changes.",
+  "covers": ["state-read", "state-write", "state-decode-parallel", "state-encode-parallel", "state-encode", "value-json", "value-msgpack", "plan-file", "plan-render", "dynamic-types"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 43 to add, 0 to change, 0 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["Plan: 0 to add, 1 to change, 0 to destroy"]},
+    {"name": "show-state", "op": "cmd", "args": ["show", "-json"]},
+    {"name": "outputs", "op": "cmd", "args": ["output", "-json"]}
+  ]
+}

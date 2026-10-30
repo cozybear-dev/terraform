@@ -1,0 +1,9 @@
+{
+  "description": "Replacement in both orders. One resource is declared as created before its predecessor is destroyed, which leaves the old object deposed while everything that uses it is updated, and which makes the resource it depends on be replaced that way too; another is destroyed first, as is one that merely depends on the first.",
+  "covers": ["destroy-edges", "walker", "deposed", "changes-index", "state-encode"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 6 to add, 0 to change, 0 to destroy"]},
+    {"name": "replace", "config": "v2", "op": "apply", "expect": ["Plan: 4 to add, 2 to change, 4 to destroy"], "order": [["create:cbd-2", "delete:cbd-1"], ["create:needed-2", "delete:needed-1"], ["create:needed-2", "create:cbd-2"], ["delete:cbd-1", "delete:needed-1"], ["delete:plain-1", "create:plain-2"], ["create:cbd-2", "apply:user-0"], ["apply:user-1", "delete:cbd-1"], ["delete:follows-id-cbd-1", "create:follows-id-cbd-2"], ["create:cbd-2", "create:follows-id-cbd-2"]]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

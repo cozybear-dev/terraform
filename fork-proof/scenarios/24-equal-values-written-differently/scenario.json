@@ -1,0 +1,10 @@
+{
+  "description": "Output values that are equal as numbers each time they're evaluated but that upstream doesn't serialize the same way each time, because how a number is written depends on the precision it's held with as well as on what it is. When refreshing changes no resource, the fork writes the common part of the two state snapshots in a plan file once and uses it for both, having decided that the two states are the same; they are only the same if every value in them would be written identically.",
+  "covers": ["plan-file", "plan-snapshot-sharing", "value-json", "state-write"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 1 to add, 0 to change, 0 to destroy"]},
+    {"name": "plan-again", "op": "plan"},
+    {"name": "apply-again", "op": "apply"},
+    {"name": "plan-once-more", "op": "plan"}
+  ]
+}

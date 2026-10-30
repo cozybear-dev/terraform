@@ -1,0 +1,9 @@
+{
+  "description": "Objects moved to new addresses without being changed: a resource renamed with all its instances, a rename that takes two chained statements, a resource given a count and another stripped of one with no statement for either (the moves Terraform implies), one instance moved to another key, a module call renamed, and one instance of a module moved to a call of its own.",
+  "covers": ["moves", "state-module-index", "state-write", "plan-render", "changes-index"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 13 to add, 0 to change, 0 to destroy"]},
+    {"name": "move", "config": "v2", "op": "apply", "expect": ["Plan: 0 to add, 0 to change, 0 to destroy", "has moved to"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

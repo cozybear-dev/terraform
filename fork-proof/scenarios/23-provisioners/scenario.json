@@ -1,0 +1,9 @@
+{
+  "description": "Provisioners: one that succeeds, one that fails after its resource has been created, which leaves the object tainted and stops what depends on it, and one that runs when its resource is destroyed. Then the failing command is fixed, and then everything is destroyed.",
+  "covers": ["failure", "tainted", "walker", "state-write", "state-snapshots"],
+  "steps": [
+    {"name": "provisioner-fails", "config": "v1", "op": "apply", "apply_rc": 1, "expect": ["Plan: 3 to add, 0 to change, 0 to destroy", "local-exec provisioner error"]},
+    {"name": "replace-tainted", "config": "v2", "op": "apply", "expect": ["is tainted, so must be replaced", "Plan: 2 to add, 0 to change, 1 to destroy"]},
+    {"name": "destroy", "op": "apply", "plan_args": ["-destroy"], "expect": ["Plan: 0 to add, 0 to change, 3 to destroy"]}
+  ]
+}

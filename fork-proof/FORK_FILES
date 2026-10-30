@@ -1,0 +1,96 @@
+# Every file in which the fork is allowed to differ from upstream: the files
+# it adds, and the files of upstream's that it changes. A name that ends in
+# a slash is a directory, all of which is the fork's.
+#
+# The proof reports any other file that differs from the pinned upstream
+# commit.
+#
+# None of upstream's own test files is listed, so the proof reports it if one
+# of them differs. The tests that the fork adds beside upstream's are in
+# files of their own, most of them named *_fork_test.go. Upstream's tests are
+# upstream's expectations, and a fork that has to change one to pass it has
+# changed what it does.
+#
+# Adding a line is a decision for a person. See proposals/workflows.
+.github/workflows/fork-image.yml
+.github/workflows/fork-proof.yml
+Dockerfile.fork
+Dockerfile.fork.dockerignore
+README-FORK.md
+internal/addrs/input_variable.go
+internal/addrs/instance_key.go
+internal/addrs/local_value.go
+internal/addrs/output_value.go
+internal/addrs/resource.go
+internal/addrs/resource_fork_test.go
+internal/backend/local/backend_apply.go
+internal/backend/local/backend_local.go
+internal/backend/local/backend_plan.go
+internal/backend/local/hook_state.go
+internal/backend/local/hook_state_fork_test.go
+internal/backend/local/large_state.go
+internal/backend/remote-state/gcs/client.go
+internal/backend/remote-state/gcs/client_download_audit_test.go
+internal/backend/remote-state/gcs/client_download_test.go
+internal/backend/remote-state/gcs/client_upload_test.go
+internal/builtin/providers/terraform/resource_data.go
+internal/command/views/version.go
+internal/lang/fastjson/fuzz_test.go
+internal/lang/fastjson/unmarshal.go
+internal/lang/fastjson/unmarshal_test.go
+internal/lang/marks/marks.go
+internal/lang/marks/marks_fork_test.go
+internal/lang/marks/paths.go
+internal/lang/marks/paths_fork_test.go
+internal/logging/logging.go
+internal/parallel/parallel.go
+internal/parallel/parallel_test.go
+internal/plans/changes.go
+internal/plans/changes_src.go
+internal/plans/changes_sync.go
+internal/plans/changes_sync_test.go
+internal/plans/planfile/reader.go
+internal/plans/planfile/tfplan.go
+internal/states/fuzz_test.go
+internal/states/instance_object.go
+internal/states/instance_object_encoded_test.go
+internal/states/instance_object_src.go
+internal/states/marshal_json.go
+internal/states/marshal_json_precision_test.go
+internal/states/marshal_json_test.go
+internal/states/marshal_json_types_test.go
+internal/states/module.go
+internal/states/remote/remote.go
+internal/states/remote/state.go
+internal/states/remote/state_revision_test.go
+internal/states/state.go
+internal/states/state_deepcopy.go
+internal/states/statefile/bench_file_test.go
+internal/states/statefile/fuzz_test.go
+internal/states/statefile/indent_json.go
+internal/states/statefile/indent_json_test.go
+internal/states/statefile/marshal_equal.go
+internal/states/statefile/marshal_equal_precision_test.go
+internal/states/statefile/read.go
+internal/states/statefile/version4.go
+internal/states/statefile/version4_decode.go
+internal/states/statefile/version4_decode_fast.go
+internal/states/statefile/version4_decode_fast_test.go
+internal/states/statefile/version4_decode_test.go
+internal/states/statefile/version4_encode.go
+internal/states/statefile/version4_encode_test.go
+internal/states/sync.go
+internal/states/sync_module_index_test.go
+internal/terraform/context_apply.go
+internal/terraform/context_plan.go
+internal/terraform/evaluate.go
+internal/terraform/marks.go
+internal/terraform/node_action_invoke.go
+internal/terraform/node_resource_abstract_instance.go
+internal/terraform/node_resource_ephemeral.go
+internal/terraform/node_resource_plan_instance_query.go
+internal/terraform/node_resource_plan_partialexp.go
+internal/terraform/update_state_hook.go
+internal/terraform/upgrade_resource_state.go
+version/fork.go
+fork-proof/

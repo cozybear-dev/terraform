@@ -1,0 +1,9 @@
+{
+  "description": "Resources with count and with for_each over a map and over a set, referring to all the instances of one another; then fewer counted instances, a key removed, a key added and a value changed.",
+  "covers": ["expander", "for-each-cache", "resource-value-cache", "changes-index", "state-encode", "plan-render", "walker"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 14 to add, 0 to change, 0 to destroy"]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to add", "to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]}
+  ]
+}

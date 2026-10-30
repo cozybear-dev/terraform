@@ -1,0 +1,26 @@
+{
+  "description": "A state with 2,250 resource instances, which is past every threshold at which the fork does something differently from upstream: it reads and writes the state in parts on several processors, compresses the plan file in parts, and, while applying, saves snapshots of the state in the background rather than after every resource instance. Then a fifth of the instances are updated, fifty are destroyed and the ones that depend on them are updated in turn. Then an apply in which one new resource fails, at a size where the fork saves snapshots in the background: what's left in the state must be what upstream leaves.",
+  "covers": [
+    "attach-dependencies",
+    "changes-index",
+    "deferred-decode",
+    "failure",
+    "plan-deflate",
+    "plan-file",
+    "plan-render",
+    "resource-value-cache",
+    "state-decode-parallel",
+    "state-encode-parallel",
+    "state-snapshots",
+    "transitive-reduction",
+    "walker"
+  ],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 2250 to add, 0 to change, 0 to destroy"]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["to change, 50 to destroy"]},
+    {"name": "nothing-to-do-again", "op": "plan", "plan_args": ["-refresh=false"], "expect": ["No changes."]},
+    {"name": "one-fails", "config": "v3", "op": "apply", "apply_rc": 1, "expect": ["Plan: 6 to add, 0 to change, 0 to destroy", "fp_thing was asked to fail when applied"]},
+    {"name": "what-was-saved", "op": "plan", "plan_args": ["-refresh=false"], "expect": ["Plan: 3 to add, 0 to change, 0 to destroy"]}
+  ]
+}

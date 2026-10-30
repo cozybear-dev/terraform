@@ -1,0 +1,10 @@
+{
+  "description": "Fourteen module calls in a chain, each taking the outputs of the one before, each with locals that build on one another, a resource with for_each, a nested module with count, and three outputs. This is the shape of configuration, large in declarations rather than in state, for which the fork rewrote how the graph is reduced and walked and how named values and module expansions are found. Then a variable that every resource depends on changes.",
+  "covers": ["walker", "transitive-reduction", "module-expansion", "expander", "named-values", "output-index", "resource-value-cache", "function-tables", "attach-dependencies", "for-each-cache"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 57 to add, 0 to change, 0 to destroy"], "order": [["stage-1-w0", "stage-2-w0"], ["stage-13-detail-1", "stage-14-w0"]]},
+    {"name": "nothing-to-do", "op": "plan", "expect": ["No changes."]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["Plan: 0 to add, 57 to change, 0 to destroy"], "order": [["stage-1-w0", "stage-2-w0"], ["stage-6-detail-1", "stage-7-w0"]]},
+    {"name": "nothing-to-do-again", "op": "plan", "expect": ["No changes."]}
+  ]
+}

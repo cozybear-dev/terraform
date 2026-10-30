@@ -1,0 +1,9 @@
+{
+  "description": "The order in which changes are made. A chain of twenty resources each waiting for the one before, which the fork's walker carries out on a single goroutine; a diamond in which one resource waits for twelve others, some of them slow; and resources that wait for a whole module, and a module that waits for resources, through depends_on alone. Run with the default ten at once and declared orderings checked against what the provider saw, for creation, for a change that passes down every dependency, and in reverse for destruction.",
+  "covers": ["walker", "transitive-reduction", "destroy-edges", "module-expansion", "attach-dependencies"],
+  "steps": [
+    {"name": "create", "config": "v1", "op": "apply", "expect": ["Plan: 37 to add, 0 to change, 0 to destroy"], "order": [["link-0", "link-1"], ["link-9", "link-10"], ["link-18", "link-19"], ["top", "middle-0"], ["top", "middle-11"], ["middle-0", "bottom"], ["middle-3", "bottom"], ["middle-11", "bottom"], ["bottom", "gate-0"], ["link-19", "gate-1"], ["gate-0", "last"], ["gate-1", "last"]]},
+    {"name": "change", "config": "v2", "op": "apply", "expect": ["Plan: 0 to add, 34 to change, 0 to destroy"], "order": [["link-0", "link-1"], ["link-9", "link-10"], ["link-18", "link-19"], ["top", "middle-0"], ["top", "middle-11"], ["middle-0", "bottom"], ["middle-3", "bottom"], ["middle-11", "bottom"]]},
+    {"name": "destroy", "op": "apply", "plan_args": ["-destroy"], "expect": ["Plan: 0 to add, 0 to change, 37 to destroy"], "order": [["link-19", "link-18"], ["link-1", "link-0"], ["bottom", "middle-5"], ["middle-0", "top"], ["middle-11", "top"], ["last", "gate-0"], ["gate-1", "bottom"], ["gate-0", "link-19"]]}
+  ]
+}
