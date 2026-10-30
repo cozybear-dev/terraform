@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+
+# Builds this fork of Terraform from the source tree in the build context,
+# for every platform requested with "docker buildx build --platform".
+#
+# This is separate from the Dockerfile next to it, which belongs to upstream.
+# The result is laid out like the official hashicorp/terraform image, so it
+# can stand in for that image: Alpine with git and an SSH client for fetching
+# modules, and /bin/terraform as the entrypoint.
+#
+#   docker buildx build -f Dockerfile.fork --platform linux/amd64,linux/arm64 .
+
+ARG GO_VERSION=1.26.8
+ARG ALPINE_VERSION=3.22
+
+# Go cross-compiles, so the compiler always runs on the builder's own
+# architecture, whatever platform the image is for.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+# What "terraform version" says about where the build came from, on a line
+# after the version itself, which is always upstream's. Left empty, the
+# binary says nothing more than upstream's does.
+ARG FORK_BUILD=""
+# Whether the build is of a development version, as a build of upstream's
+# main branch is, or of the released version that the fork is based on, as
+# upstream's own release builds are. "terraform version" says "-dev" after
+# the version number for the first.
+ARG VERSION_DEV="yes"
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false \
+      -ldflags "-s -w -X 'github.com/hashicorp/terraform/version.dev=${VERSION_DEV}' -X 'github.com/hashicorp/terraform/version.ForkBuild=${FORK_BUILD}'" \
+      -o /out/terraform .
+
+FROM alpine:${ALPINE_VERSION}
+RUN apk add --no-cache git openssh-client ca-certificates
+COPY --from=build /out/terraform /bin/terraform
+ENTRYPOINT ["/bin/terraform"]
